@@ -35,6 +35,11 @@ def capture(secs=180, antenna="Antenna A"):
     from SoapySDR import SOAPY_SDR_RX
     sdr, st = cw._open_sdr(antenna, FS)
     sdr.setFrequency(SOAPY_SDR_RX, 0, 1575.42e6)
+    for key in ("biasT_ctrl", "biasT", "bias_tee"):     # power an ACTIVE GPS antenna
+        try:
+            sdr.writeSetting(key, "true")
+        except Exception:
+            pass
     time.sleep(0.5)
     iq = cw._grab(sdr, st, secs, FS)
     sdr.deactivateStream(st)
