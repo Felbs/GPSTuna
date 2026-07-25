@@ -1,0 +1,6 @@
+*.cs16
+*.cf32
+captures/
+lab_local/
+__pycache__/
+*.pyc
