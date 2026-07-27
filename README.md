@@ -1,16 +1,17 @@
-# GPSTuna 🛰️ — a software GPS receiver from raw SDR IQ  *(beta)*
+# GPSTuna 🛰️ — a software GPS receiver from raw SDR IQ
 
-Point any SDR at 1575.42 MHz, record a few minutes of the raw L1 hiss, and this
-turns it into satellite orbits, a relativity experiment, and — with enough sky —
-your own position. No GPS chip; just the antenna, the radio, and the math.
+Point any SDR at 1575.42 MHz, record 90 seconds of the raw L1 hiss, and this
+turns it into satellite orbits, a relativity experiment, and your position.
+No GPS chip; just the antenna, the radio, and the math.
 
-**Status:** the receiver *works* — it acquires satellites, tracks them, decodes
-the 50 bps navigation message (parity-checked, majority-voted), and computes each
-satellite's orbit. The **position fix** is implemented and its math validated;
-it needs a capture with ≥4 satellites (an antenna with sky view) to converge —
-that's the beta line.
+**Status: it works.** From a single 90 s capture on a cheap active patch
+antenna in an attic, the full chain — acquisition → tracking → 50 bps nav
+decode → ephemerides → pseudoranges → least-squares — produced a **7-satellite
+position fix with 57 m residual rms** and a plausible altitude. Single
+frequency, no ionosphere correction, one snapshot: that residual is the honest
+physics of the measurement, not a rounding of somebody else's answer.
 
-## What it already does
+## What it does
 - **Decodes the GPS nav message** from your own capture — ephemeris, clock terms,
   week number, timestamps — via preamble frame-sync, IS-GPS-200 parity, and a
   majority vote across the 30-second subframe repeats (drives ~4% bit errors to
@@ -23,10 +24,27 @@ that's the beta line.
 
   ![relativistic clock wobble](figures/relativity_wobble.png)
 - **Computes satellite positions.** `fix.py`'s ephemeris→ECEF (Kepler + all
-  harmonic corrections + Earth rotation) validates against the GPS orbit shell
-  (a decoded PRN gives |r| ≈ 26,100 km).
+  harmonic corrections + Earth rotation) follows IS-GPS-200 Table 20-IV and
+  cross-checks in full 3D against SGP4-propagated operational TLEs (1–3 km,
+  the TLEs' own accuracy).
+- **Solves your position.** Coarse transmit time from a linear fit across every
+  parity-clean subframe anchor (fit residual doubles as a built-in truth check:
+  microseconds = healthy), sub-millisecond from a common-epoch code-phase
+  snapshot, satellite clock + relativistic corrections, Sagnac rotation, and an
+  exhaustive integer-millisecond search scored by residual + altitude sanity.
 - **Ionospheric scintillation** (`scint.py`) — S4 + phase indices from the same
   tracking, as a space-weather bonus.
+
+### Three lessons the working fix taught us (so you don't relearn them)
+1. **Code phase points at the *next* code epoch** — transmit time assembles as
+   `N − φ`, not `N + φ`. A sign, hidden inside 50 km of error.
+2. **Code milliseconds tick on the satellite's clock, not GPS system time.**
+   Assemble integer + fraction in SV time and subtract the clock correction
+   *afterward* — `af0` alone spans ±0.5 ms (±150 km) if you subtract it first.
+3. **Never trust `round()` for the integer millisecond.** Coarse times are
+   ms-quantized per satellite; pin one reference bird and exhaustively search
+   the relative integers — with ≥5 birds only the true set collapses the
+   residuals *and* lands at a sane altitude.
 
 ## Architecture (full signal chain)
 ```mermaid
@@ -61,13 +79,17 @@ flowchart TD
 
 ## Run it
 ```bash
+python locate.py                                       # one command: capture -> count -> fix
 python measure.py  --iq your_capture.cs16 --selftest   # sanity (synthetic -20 dB)
 python relativity.py --iq your_capture.cs16            # decode Einstein
 python fix.py --validate                               # satellite-position math
-python fix.py --iq your_4sat_capture.cs16              # position fix (>=4 birds)
+python fix.py --iq your_capture.cs16                   # position fix (>=4 birds)
+python fix.py --resolve                                # re-solve from cache in seconds
 ```
-Capture tip: an antenna at a window or a ~$10 active GPS patch antenna sees 8–12
-satellites; indoors you may see only 1–2.
+Capture tip: an antenna at a window or a ~$10 active GPS patch antenna (bias-T
+powered) sees 7–12 satellites; deep indoors you may see only 1–3. `--resolve`
+reuses the cached pseudoranges from the last full run, so experimenting with
+the solve never costs another 15-minute decode.
 
 ## Privacy
 `fix.py` writes any computed position **only** to `lab_local/` (gitignored). The
@@ -116,6 +138,18 @@ every satellite clock before launch by **−4.4647×10⁻¹⁰**. `relativity.py
 that same figure from the orbit *we decode ourselves* and matches it to **99.9%**;
 without the correction, positions would drift **~11 km/day**. The system is, in
 effect, a continuously-running verification of Einstein — and this repo reads it.
+
+## Acknowledgments
+- **IS-GPS-200 / WGS-84** — the U.S. government publishes GPS's entire radio
+  interface for free; every equation here traces to those documents.
+- **[laika](https://github.com/commaai/laika)** (comma.ai) — its pure-Python
+  ephemeris→ECEF code was our line-by-line referee while debugging the fix.
+- **[PocketSDR](https://github.com/tomojitakasu/PocketSDR)** (Tomoji Takasu),
+  **[gnss-sdr](https://gnss-sdr.org/)**, and **Andrew Holme's homemade GPS
+  receiver** — the open receivers whose existence proves this is doable and
+  whose write-ups lit the path.
+- **[python-sgp4](https://github.com/brandon-rhodes/python-sgp4)** + CelesTrak's
+  operational TLEs — the independent orbit referee for validating `sat_ecef()`.
 
 ## Lineage
 Built from the `radio-grid-atlas` GPS-L1 work; algorithms per **IS-GPS-200** and

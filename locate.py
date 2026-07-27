@@ -10,8 +10,8 @@ Indoors you'll see 1-3 weak satellites (not enough); with sky view, 6-12.
 
 A 3D fix needs >= 4 satellites strong enough to decode their orbit (metric > 3.5,
 C/N0 ~ 38+). This prints the count first so you know immediately whether the sky
-view is good; if it is, the final pseudorange solve runs and the result stays
-private in lab_local/fix.txt.
+view is good; if it is, the full pseudorange solve runs and the result stays
+private in lab_local/fix_result.json.
 """
 import argparse
 import sys
@@ -23,7 +23,7 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from measure import acquire, load_seg
-from fix import decode_eph, sat_ecef, ecef_to_llh
+from fix import full_fix
 
 FS = 2.048e6
 LOCAL = HERE / "lab_local"
@@ -57,7 +57,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--iq", help="existing capture; else capture live")
     ap.add_argument("--secs", type=float, default=180)
-    ap.add_argument("--antenna", default="Antenna A")
+    ap.add_argument("--antenna", default="Antenna B",
+                    help="SDR antenna port (the one with bias-T if your GPS patch is active)")
     a = ap.parse_args()
     path = a.iq or capture(a.secs, a.antenna)
     dur = Path(path).stat().st_size / 4 / FS
@@ -74,21 +75,13 @@ def main():
         print("and run again - sky view is the only thing missing.")
         return
     print("\n>= 4 strong satellites - decoding orbits + solving position...")
-    # decode ephemeris + compute sat positions; the pseudorange snapshot solve
-    # is completed and validated against this first real 4-bird capture, then the
-    # fix is written to lab_local/fix.txt (never printed to any shared channel).
-    good = {}
-    for p, r in strong.items():
-        eph = decode_eph(path, FS, p, r["dopp"], dur)
-        if {"e", "sqrtA", "M0", "omega", "i0", "Omega0", "toe"}.issubset(eph):
-            good[p] = eph
-    print(f"[locate] {len(good)} satellites with a complete decoded orbit")
-    if len(good) < 4:
-        print("[locate] < 4 complete orbits (signals strong but a longer capture")
-        print("         helps subframe decode) - capture 300 s and retry.")
-        return
-    print("[locate] complete - see lab_local/fix.txt (kept private, not committed)")
-    # pseudorange assembly + solve() -> LOCAL/'fix.txt' happens here on real data.
+    # full pipeline: nav decode with timing anchors -> common-epoch snapshot
+    # code phases -> SV-time pseudorange assembly -> least-squares solve.
+    # The fix is written ONLY to lab_local/fix_result.json (gitignored).
+    rc = full_fix(path, FS, strong, dur)
+    if rc:
+        print("[locate] not enough complete orbits - a longer capture (300 s)")
+        print("         usually gets the remaining subframes; retry.")
 
 
 if __name__ == "__main__":
