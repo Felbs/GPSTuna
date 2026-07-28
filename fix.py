@@ -38,7 +38,12 @@ def decode_eph(path, fs, prn, dopp, dur, want_timing=False):
     union+vote harvest, standalone so it runs per satellite).
     want_timing=True also returns {tent, anchors:[(bit_idx, sf, tow)]} - the
     millisecond-accurate subframe clock the pseudorange assembly needs."""
-    tr = track_sv(path, fs, prn, dopp, dur)
+    # Track only over the demod window (prompt_stream caps at 118 s): a
+    # single fixed fd fitted across a LONG track is hundreds of Hz wrong at
+    # the window and collapses parity to ~1% - the "long-file decode" bug.
+    # Anchor-fit extrapolation to later epochs is unaffected (clock-rate
+    # residuals ~1e-12 x hundreds of s = ns).
+    tr = track_sv(path, fs, prn, dopp, min(dur, 120.0))
     from measure import bit_tent
     tent = int(np.argmax(bit_tent(path, fs, tr, 5.0, 10.0)))
     p = prompt_stream(path, fs, tr, 1.0, min(dur - 2.0, 118.0))
@@ -462,6 +467,20 @@ def full_fix(path, fs, det, dur, multi=1):
         birds[prn] = (eph, tim)
         print(f"  PRN{prn}: ephemeris COMPLETE, {len(tim['anchors'])} anchors, "
               f"C/N0 {tim['tr']['cn0']:.0f} dB-Hz")
+    # toe consensus gate: ephemeris reference times normally sit on the
+    # 2-hour grid (toe % 7200 == 0). A lone bird off-grid while its
+    # siblings agree is almost always a voted-in bit error (one LSB of
+    # toe = 16 s = ~60 km of satellite position - it poisons the whole
+    # solve). Post-upload cutover sets CAN be legitimately off-grid, so
+    # this only fires when the bird is BOTH off-grid and alone in it.
+    on_grid = [p for p, (e, _t) in birds.items() if e["toe"] % 7200 == 0]
+    if len(on_grid) >= 3:
+        for prn in [p for p in list(birds) if p not in on_grid]:
+            toe_bad = birds[prn][0]["toe"]
+            print(f"  PRN{prn}: toe {toe_bad:.0f} off the 2-hour grid while "
+                  f"{len(on_grid)} siblings are on it - DROPPED "
+                  f"(suspected voted-in bit error)")
+            del birds[prn]
     if len(birds) < 4:
         print(f"[fix] only {len(birds)} birds fully decoded - need 4")
         return 1
