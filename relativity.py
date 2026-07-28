@@ -47,9 +47,15 @@ PAR = [
 # ------------------------------------------------------------ bits from RF
 def prompt_stream(path, fs, tr, t_start, dur_s):
     """Phase-continuous 1 ms prompts over dur_s using the track's code-phase
-    model (slope/icpt) and a fixed-fd carrier wipe on ABSOLUTE time (so the
-    carrier reference never resets between chunks)."""
+    model (slope/icpt) and a carrier wipe on ABSOLUTE time (so the carrier
+    reference never resets between chunks). If the track dict carries a
+    Doppler-rate model (tr['fdot'], tr['tref']; fd taken AT tref) the wipe
+    is a linear chirp - over long streams (>90 s) a fixed fd leaves tens of
+    Hz of residual at the edges, which defeats the smoothed-p^2 phase
+    reference in subframe_bits. Plain tracks (no 'fdot') are unchanged."""
     n1 = int(round(fs * 1e-3))
+    fdot = tr.get("fdot", 0.0)
+    tref = tr.get("tref", 0.0)
     out = []
     for chunk in range(int(dur_s * 10)):
         t0 = t_start + chunk * 0.1
@@ -57,7 +63,8 @@ def prompt_stream(path, fs, tr, t_start, dur_s):
         ci = int(round(tr["slope"] * t0 + tr["icpt"])) % n1
         code = np.roll(sampled_code(tr["prn"], fs, n1), ci)
         t_abs = t0 + np.arange(len(x)) / fs
-        xw = x * np.exp(-2j * np.pi * tr["fd"] * t_abs)
+        xw = x * np.exp(-2j * np.pi * (tr["fd"] * t_abs
+                                       + 0.5 * fdot * (t_abs - tref) ** 2))
         out.append((xw.reshape(100, n1) * code[None, :]).sum(axis=1))
     return np.concatenate(out)
 

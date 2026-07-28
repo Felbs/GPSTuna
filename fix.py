@@ -103,9 +103,11 @@ def decode_eph(path, fs, prn, dopp, dur, want_timing=False):
 
 
 def sat_ecef(eph, t):
-    """IS-GPS-200 Table 20-IV: ephemeris + GPS time t -> satellite ECEF (m)."""
+    """IS-GPS-200 Table 20-IV: ephemeris + GPS time t -> satellite ECEF (m).
+    Works for Galileo too (same Kepler machinery, GTRF~WGS84 at our accuracy):
+    put mu=3.986004418e14 (Galileo OS SIS ICD 5.1.1) in the eph dict."""
     A = eph["sqrtA"] ** 2
-    n0 = np.sqrt(MU / A ** 3)
+    n0 = np.sqrt(eph.get("mu", MU) / A ** 3)
     tk = t - eph["toe"]
     if tk > 302400:
         tk -= 604800
@@ -142,7 +144,7 @@ def ecc_anomaly(eph, t):
         tk -= 604800
     elif tk < -302400:
         tk += 604800
-    M = eph["M0"] + (np.sqrt(MU / A ** 3) + eph.get("dn", 0.0)) * tk
+    M = eph["M0"] + (np.sqrt(eph.get("mu", MU) / A ** 3) + eph.get("dn", 0.0)) * tk
     E = M
     for _ in range(15):
         E = M + eph["e"] * np.sin(E)

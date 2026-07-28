@@ -190,6 +190,7 @@ def track_prn(mm, fs, prn, fd0, start_samp, dur_s, bocB, bocC, d_el=0.25,
     pCw = np.zeros(n_blocks, dtype=np.complex128)    # secondary-wiped pilot
     ephi = np.zeros(n_blocks)
     fds = np.zeros(n_blocks)
+    ptrs = np.zeros(n_blocks, dtype=np.int64)        # file sample @ block start
     sec_off, sec_sign, sec_frac = None, 1.0, 0.0
     N_COSTAS = 375                                   # 1.5 s of Costas first
     pilot_raw = np.zeros(N_COSTAS, dtype=np.complex128)
@@ -200,6 +201,7 @@ def track_prn(mm, fs, prn, fd0, start_samp, dur_s, bocB, bocC, d_el=0.25,
         n = int(round((CODE_LEN - chip_off) / cr * fs))
         if ptr + n > n_total:
             break
+        ptrs[k] = ptr                                # timing anchor for pseudoranges
         raw = mm[2 * ptr: 2 * (ptr + n)]
         x = raw[0::2].astype(np.float32) + 1j * raw[1::2].astype(np.float32)
         tt = np.arange(n) / fs
@@ -252,6 +254,7 @@ def track_prn(mm, fs, prn, fd0, start_samp, dur_s, bocB, bocC, d_el=0.25,
                       f"{'SYNC' if match > 0.85 else 'WEAK -- pilot not clean'}")
     n_blocks = k
     pB, pCw, ephi, fds = pB[:k], pCw[:k], ephi[:k], fds[:k]
+    ptrs = ptrs[:k]
 
     # ---- per-second quality
     nsec = n_blocks // SPP
@@ -271,7 +274,8 @@ def track_prn(mm, fs, prn, fd0, start_samp, dur_s, bocB, bocC, d_el=0.25,
               f"PLL lock mean {l2.mean():.3f} (min {l2.min():.3f})")
         print(f"  Doppler {fds[0]:+.1f} -> {fds[-1]:+.1f} Hz over the track")
     return dict(prn=prn, sym=pB.real, pB=pB, cn0=cn0, lock=lock, fds=fds,
-                sec_off=sec_off, sec_frac=sec_frac, n_blocks=n_blocks)
+                sec_off=sec_off, sec_frac=sec_frac, n_blocks=n_blocks,
+                ptrs=ptrs)
 
 
 # ------------------------------------------------------------- frame chain
@@ -377,19 +381,34 @@ def parse_word(page):
         f["Omega0_sc"] = _s(w, 16, 32) * 2**-31
         f["i0_sc"] = _s(w, 48, 32) * 2**-31
         f["omega_sc"] = _s(w, 80, 32) * 2**-31
+        f["IDOT_sc"] = _s(w, 112, 14) * 2**-43      # semicircles/s
     elif wt == 3:
         f["IODnav"] = _u(w, 6, 10)
+        f["OmegaDot_sc"] = _s(w, 16, 24) * 2**-43   # semicircles/s
+        f["dn_sc"] = _s(w, 40, 16) * 2**-43         # semicircles/s
+        f["Cuc"] = _s(w, 56, 16) * 2**-29           # rad
+        f["Cus"] = _s(w, 72, 16) * 2**-29           # rad
+        f["Crc"] = _s(w, 88, 16) * 2**-5            # m
+        f["Crs"] = _s(w, 104, 16) * 2**-5           # m
         f["SISA"] = _u(w, 120, 8)
     elif wt == 4:
         f["IODnav"] = _u(w, 6, 10)
         f["SVID"] = _u(w, 16, 6)
+        f["Cic"] = _s(w, 22, 16) * 2**-29           # rad
+        f["Cis"] = _s(w, 38, 16) * 2**-29           # rad
         f["toc"] = _u(w, 54, 14) * 60
         f["af0"] = _s(w, 68, 31) * 2**-34
         f["af1"] = _s(w, 99, 21) * 2**-46
         f["af2"] = _s(w, 120, 6) * 2**-59
     elif wt == 5:
         f["ai0"] = _u(w, 6, 11) * 2**-2
+        f["ai1"] = _s(w, 17, 11) * 2**-8
+        f["ai2"] = _s(w, 28, 14) * 2**-15
+        f["BGD_E1E5a"] = _s(w, 47, 10) * 2**-32     # s
+        f["BGD_E1E5b"] = _s(w, 57, 10) * 2**-32     # s (I/NAV E1 users: Eq 15)
+        f["E5bHS"] = _u(w, 67, 2)
         f["E1BHS"] = _u(w, 69, 2)
+        f["E5bDVS"] = _u(w, 71, 1)
         f["E1BDVS"] = _u(w, 72, 1)
         f["WN"] = _u(w, 73, 12)
         f["TOW"] = _u(w, 85, 20)
@@ -398,6 +417,19 @@ def parse_word(page):
         f["A1"] = _s(w, 38, 24) * 2**-50
         f["dtLS"] = _s(w, 62, 8)
         f["TOW"] = _u(w, 105, 20)
+    elif wt == 10:
+        # GST-GPS conversion (GGTO), OS SIS ICD 5.1.8 Eq 21:
+        # dt_systems = t_Galileo - t_GPS
+        #            = A0G + A1G*(TOW - t0G + 604800*((WN - WN0G) mod 64))
+        # all-ones in all four fields = GGTO not valid (ICD 5.1.8)
+        f["ggto_valid"] = not (_u(w, 86, 16) == 0xFFFF
+                               and _u(w, 102, 12) == 0xFFF
+                               and _u(w, 114, 8) == 0xFF
+                               and _u(w, 122, 6) == 0x3F)
+        f["A0G"] = _s(w, 86, 16) * 2**-35           # s
+        f["A1G"] = _s(w, 102, 12) * 2**-51          # s/s
+        f["t0G"] = _u(w, 114, 8) * 3600             # s
+        f["WN0G"] = _u(w, 122, 6)                   # GST week mod 64
     return wt, f
 
 

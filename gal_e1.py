@@ -155,8 +155,18 @@ def acquire(x, fs, replicas, dopplers, n_noncoh):
         for off in range(-excl, excl + 1):
             mask[(ci + off) % m.shape[1]] = False
         lam = m[di, ci] / np.median(m) - 1.0            # ~coherent SNR
+        # sub-sample peak (parabolic on the power triplet, as measure.py):
+        # one sample is 73 m of pseudorange at 4.096 MS/s. The BOC peak is
+        # sharper than BPSK's so the parabola is approximate - good enough
+        # at this accuracy. code_phase stays int for existing consumers.
+        row = m[di]
+        y1, y2, y3 = (row[(ci - 1) % len(row)], row[ci],
+                      row[(ci + 1) % len(row)])
+        den = y1 - 2.0 * y2 + y3
+        frac = float(np.clip(0.5 * (y1 - y3) / den, -0.5, 0.5)) if den else 0.0
         out[p] = dict(metric=float(m[di, ci] / m[:, mask].max()),
                       dopp=float(dopplers[di]), code_phase=int(ci),
+                      code_phase_f=float(ci + frac),
                       peak_over_floor=float(m[di, ci] / np.median(m)),
                       cn0=float(10 * np.log10(max(lam, 1e-9))
                                 + 10 * np.log10(1.0 / T_COH)))
