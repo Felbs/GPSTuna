@@ -97,11 +97,33 @@ flowchart TD
 
   subgraph SCI["what the numbers unlock"]
     EPH --> REL["relativity.py<br/>eccentricity clock wobble &plusmn;39 ns<br/>SR + GR budget vs the -4.4647e-10 detune (99.9%)"]
-    EPH --> ECEF["sat_ecef() — IS-GPS-200 Kepler solve<br/>+ harmonic corrections + Earth rotation<br/>-&gt; satellite ECEF (|r| ~ 26,100 km)"]
+    EPH --> ECEF["sat_ecef() — IS-GPS-200 Kepler solve<br/>+ harmonic corrections + Earth rotation<br/>-&gt; satellite ECEF (|r| ~ 26,560 km)"]
     TRK --> SCINT["scint.py — S4 + phase scintillation<br/>(ionospheric space weather)"]
-    ECEF --> FIX["fix.py solve() — pseudoranges +<br/>least-squares (x, y, z, clock)<br/>[needs &gt;=4 satellites]"]
+    TRK --> TCXO["TCXO calibration —<br/>measured vs predicted Doppler<br/>-&gt; oscillator error in ppb"]
+    EPH --> IONO["Klobuchar terms<br/>(subframe 4 page 18,<br/>decoded or archived)"]
+    ECEF --> FIX["fix.py — SV-time pseudorange assembly<br/>(t = N &minus; &phi;, sub-sample code phase)<br/>+ integer search + tropo/iono<br/>+ multi-epoch ECEF averaging"]
+    IONO --> FIX
   end
-  FIX -. "lab_local/ only - never public" .-> LOC["your position"]
+  FIX -. "lab_local/ only - never public" .-> LOC["your position<br/>~45 m mean, 14 m repeatability"]
+```
+
+### The Galileo I/NAV chain (`gal_e1.py` + `gal_inav.py`)
+```mermaid
+flowchart TD
+  IQ2["same 1575.42 MHz IQ capture<br/>(wideband &ge;4 MS/s for full BOC lobes)"]
+  IQ2 --> GACQ["gal_e1.py acquire —<br/>E1-B/E1-C BOC(1,1) replicas, 36 PRNs<br/>4 ms coherent &times; 40 noncoherent<br/>(code tables fetched from gnss-sdr, GPL, at runtime)"]
+  GACQ --> DUAL["dual-code confirmation:<br/>E1-B and E1-C are independent 4092-chip codes —<br/>a real bird shows BOTH at one code phase + Doppler"]
+  DUAL --> PILOT["E1-C pilot tracking —<br/>carrier-aided EML DLL + fine freq"]
+  PILOT --> CS25["CS25 secondary-code wipeoff<br/>(25 &times; 4 ms = 100 ms pattern)"]
+  CS25 --> PLL["pure 4-quadrant PLL<br/>(pilot is dataless — no Costas ambiguity)"]
+  PLL --> SYM["E1-B correlation at 4 ms<br/>-&gt; 250 sym/s soft symbols"]
+  SYM --> PRE["preamble sync 0101100000<br/>(per 1 s sub-page, resolves polarity)"]
+  PRE --> DEINT["8 &times; 30 block deinterleaver"]
+  DEINT --> VIT["soft Viterbi, K=7, 171/133 octal<br/>(second branch inverted per the ICD)"]
+  VIT --> CRC["CRC-24Q per page<br/>(1161/1161 clean on 3 birds, 777 s)"]
+  CRC --> WORDS["I/NAV word parser —<br/>ephemeris, health, GST WN/TOW, dtLS"]
+  WORDS --> GST["Galileo System Time read off the air<br/>verified vs wall clock to the second"]
+  WORDS --> E14["the E14 catch: eccentric orbit e=0.168<br/>+ do-not-use flag — the gravitational-redshift<br/>test satellite, decoded from an attic"]
 ```
 
 ## Run it
