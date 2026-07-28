@@ -191,6 +191,10 @@ def track_prn(mm, fs, prn, fd0, start_samp, dur_s, bocB, bocC, d_el=0.25,
     ephi = np.zeros(n_blocks)
     fds = np.zeros(n_blocks)
     ptrs = np.zeros(n_blocks, dtype=np.int64)        # file sample @ block start
+    phs = np.zeros(n_blocks)                         # carrier NCO phase (rad)
+                                                     # @ block start: continuous
+                                                     # integrated Doppler for
+                                                     # carrier-smoothing use
     sec_off, sec_sign, sec_frac = None, 1.0, 0.0
     N_COSTAS = 375                                   # 1.5 s of Costas first
     pilot_raw = np.zeros(N_COSTAS, dtype=np.complex128)
@@ -202,6 +206,7 @@ def track_prn(mm, fs, prn, fd0, start_samp, dur_s, bocB, bocC, d_el=0.25,
         if ptr + n > n_total:
             break
         ptrs[k] = ptr                                # timing anchor for pseudoranges
+        phs[k] = phase                               # carrier phase at this sample
         raw = mm[2 * ptr: 2 * (ptr + n)]
         x = raw[0::2].astype(np.float32) + 1j * raw[1::2].astype(np.float32)
         tt = np.arange(n) / fs
@@ -255,6 +260,7 @@ def track_prn(mm, fs, prn, fd0, start_samp, dur_s, bocB, bocC, d_el=0.25,
     n_blocks = k
     pB, pCw, ephi, fds = pB[:k], pCw[:k], ephi[:k], fds[:k]
     ptrs = ptrs[:k]
+    phs = phs[:k]
 
     # ---- per-second quality
     nsec = n_blocks // SPP
@@ -275,7 +281,7 @@ def track_prn(mm, fs, prn, fd0, start_samp, dur_s, bocB, bocC, d_el=0.25,
         print(f"  Doppler {fds[0]:+.1f} -> {fds[-1]:+.1f} Hz over the track")
     return dict(prn=prn, sym=pB.real, pB=pB, cn0=cn0, lock=lock, fds=fds,
                 sec_off=sec_off, sec_frac=sec_frac, n_blocks=n_blocks,
-                ptrs=ptrs)
+                ptrs=ptrs, phs=phs)
 
 
 # ------------------------------------------------------------- frame chain

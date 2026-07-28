@@ -340,6 +340,9 @@ def _load_cache(pattern):
 
 
 # -------------------------------------------------------------- stage: solve
+# stage_solve(snap_name=..., out_name=...) lets alternate snapshot files (e.g.
+# hatch.py's carrier-smoothed code phases) run through the identical assembly
+# + integer search + LS machinery, so smoothed-vs-raw is a one-variable A/B.
 def solve_lsq(rows, use_isb):
     """rows = [(sat_ecef, pr_m, is_gal)]. LS for (x,y,z,c*dt[,c*isb])."""
     x = np.zeros(5 if use_isb else 4)
@@ -489,10 +492,10 @@ def search_offsets(entries, use_isb, ggto_dt=None, seed=None):
     return total
 
 
-def stage_solve():
+def stage_solve(snap_name="joint_snap.json", out_name="fix_result_joint.json"):
     gps = _load_cache("joint_gps_prn*.json")
     gal = _load_cache("joint_gal_prn*.json")
-    snap = json.loads((LAB / "joint_snap.json").read_text())
+    snap = json.loads((LAB / snap_name).read_text())
     print(f"[solve] {len(gps)} GPS + {len(gal)} Galileo birds, "
           f"{len(snap)} snapshot epochs")
 
@@ -698,7 +701,7 @@ def stage_solve():
            "bgd_e1e5b_ns": {str(b["prn"]): b["eph"].get("BGD_E1E5b", 0) * 1e9
                             for b in gal},
            "tow_convention_offset_s": dconv}
-    (LAB / "fix_result_joint.json").write_text(json.dumps(out, indent=1))
+    (LAB / out_name).write_text(json.dumps(out, indent=1))
 
     print("\n" + "=" * 72)
     for name, r in (("GPS-only", res_gps), ("JOINT 5-unk", res_j5),
@@ -722,7 +725,7 @@ def stage_solve():
             print(f"  estimated-minus-decoded = {np.mean(isbs)-dec_ns:+.1f} ns"
                   f" (residual = receiver BOC-vs-BPSK group delay + solve "
                   f"noise)")
-    print("coordinates written ONLY to lab_local/fix_result_joint.json")
+    print(f"coordinates written ONLY to lab_local/{out_name}")
     print("=" * 72)
     return 0
 
@@ -734,6 +737,10 @@ def main():
     ap.add_argument("--prn", type=int, default=None)
     ap.add_argument("--epochs", default=None,
                     help="snap only: e.g. 0-3 or 4,5,6")
+    ap.add_argument("--snap", default="joint_snap.json",
+                    help="solve only: alternate snapshot file in lab_local/")
+    ap.add_argument("--out", default="fix_result_joint.json",
+                    help="solve only: result file name in lab_local/")
     a = ap.parse_args()
     if a.stage == "gal":
         return stage_gal(a.prn)
@@ -748,7 +755,7 @@ def main():
             else:
                 sel = [int(v) for v in a.epochs.split(",")]
         return stage_snap(sel)
-    return stage_solve()
+    return stage_solve(a.snap, a.out)
 
 
 if __name__ == "__main__":
