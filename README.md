@@ -189,10 +189,44 @@ normal with sky view.
 8. *A decode that matches truth through a broken frame sync is luck, not
    skill.* Re-derive, don't celebrate early.
 
+**Know your radio's clocks (this bites EVERY SDR, differently):**
+Your SDR has one physical oscillator, but it reaches your measurements down
+two different paths — the sample clock (which sets code-phase timing) and
+the LO (which sets carrier frequency/phase) — and GPS is precise enough to
+see every imperfection in both. Three calibrations, each measured *with the
+GPS signals themselves* (no extra equipment):
+
+1. **Absolute oscillator offset.** Measured carrier Doppler minus the
+   Doppler predicted from decoded ephemerides at your solved position: the
+   common offset across all birds is YOUR crystal's error. Ours (RSPdx TCXO):
+   +797 ppb, agreeing to 2.3 Hz across seven satellites. An RTL-SDR's cheap
+   crystal can be 10–50 **ppm** — 50× our error — so widen your acquisition
+   Doppler search (±30 kHz+) until you've measured it, then correct and
+   narrow. Symptom of ignoring it: acquisition finds nothing, or every bird
+   sits at a suspicious common Doppler offset.
+2. **Code-clock vs carrier-clock split.** Here's the subtle one — we found
+   it because carrier smoothing "mysteriously" lagged ~300 m. Diagnostic:
+   compute code-minus-carrier (CMC) per satellite. Real physics (ionosphere)
+   makes CMC drift *differently* per bird, slowly, sub-mm/s. Our CMC drifted
+   **−5.956 m/s identically on all nine birds of both constellations** —
+   identical-everywhere means it's the receiver, not the sky: the sample
+   clock and LO paths differ by 19.87 ppb in this capture. Fix: fit the
+   common CMC slope and remove it globally before Hatch smoothing. Different
+   SDR architectures (fractional-N synthesis, resamplers, separate clock
+   domains) will show different splits — measure yours, don't assume zero.
+3. **Timing self-checks are free.** The nav-message anchor fit (file-time vs
+   satellite-time across subframes) should have MICROSECOND residuals — if
+   yours are worse, suspect dropped samples (count your stream API's
+   overflow returns!) before blaming the math. Rapid device open/close
+   cycles can also wedge some SDRs' driver services (ours needs a service
+   restart + open-by-enumerated-serial afterwards).
+
 **The accuracy ladder, honestly:** 57 m (first fix) → 43 m (troposphere +
-decoded ionosphere) → **45 m mean with 14 m epoch scatter** (sub-sample code
-phase + 8-epoch ECEF averaging). Next rungs: carrier-phase smoothing, a
-joint GPS+Galileo solve, WAAS corrections.
+decoded ionosphere) → 45 m mean with 14 m epoch scatter (sub-sample code
+phase + 8-epoch ECEF averaging) → **27 m mean / 12 m scatter** (joint
+GPS+Galileo + carrier-phase Hatch smoothing, `hatch.py`). Next rungs: WAAS
+corrections, measurement-centroid de-smearing, a calibrated inter-signal
+delay.
 
 ## Privacy
 `fix.py` writes any computed position **only** to `lab_local/` (gitignored). The
