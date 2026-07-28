@@ -4,8 +4,16 @@ Point any SDR at 1575.42 MHz, record the raw L1 hiss, and this turns it into
 satellite orbits, a relativity experiment, Galileo's navigation message, and
 your position. No GPS chip; just the antenna, the radio, and the math.
 
-**Status: dual-constellation.** From captures on a cheap active patch antenna
-in an attic:
+**Status: dual-constellation, jointly solved.** From captures on a cheap
+active patch antenna in an attic:
+- **Joint GPS+Galileo position fix: 26.8 m mean rms with 15.4 m
+  repeatability** (`joint_fix.py`) — 6 GPS + 3 Galileo birds solved together
+  with the inter-system time offset as a fifth unknown, Galileo pseudoranges
+  assembled from I/NAV page timing on the 4 ms E1 code grid. The broadcast
+  GPS-Galileo time offset (GGTO, word type 10) decodes to +6.0 ns; the
+  estimated fifth unknown differs by ~180 ns of receiver BOC-vs-BPSK
+  inter-signal delay — measured, documented, honest. Delightfully, including
+  E14 (the "do-not-use" eccentric bird) *improves* the solution.
 - **GPS position fix at ~45 m mean residual with 14 m repeatability** — full
   chain: acquisition → tracking → 50 bps nav decode → ephemerides (including
   the broadcast Klobuchar ionosphere model, decoded off the air) → sub-sample
