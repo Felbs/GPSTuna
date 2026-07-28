@@ -179,6 +179,44 @@ def ecef_to_llh(p):
     return np.degrees(lat), np.degrees(lon), h
 
 
+def az_el(rx, sp):
+    """Azimuth/elevation (radians) of satellite ECEF sp from receiver ECEF rx."""
+    lat, lon, _ = ecef_to_llh(rx)
+    la, lo = np.radians(lat), np.radians(lon)
+    d = sp - rx
+    e = np.array([-np.sin(lo), np.cos(lo), 0.0]) @ d
+    n = np.array([-np.sin(la) * np.cos(lo), -np.sin(la) * np.sin(lo),
+                  np.cos(la)]) @ d
+    u = np.array([np.cos(la) * np.cos(lo), np.cos(la) * np.sin(lo),
+                  np.sin(la)]) @ d
+    return np.arctan2(e, n) % (2 * np.pi), np.arcsin(u / np.linalg.norm(d))
+
+
+def klobuchar(a, b, lat_deg, lon_deg, az, el, t_gps):
+    """IS-GPS-200 20.3.3.5.2.5 broadcast ionosphere model: L1 delay in
+    SECONDS from the subframe-4 page-18 alpha/beta terms. az/el radians,
+    t_gps in GPS seconds (time-of-week is fine; only time-of-day matters)."""
+    E = el / np.pi                                     # semicircles
+    psi = 0.0137 / (E + 0.11) - 0.022                  # earth central angle
+    phi_i = np.clip(lat_deg / 180.0 + psi * np.cos(az), -0.416, 0.416)
+    lam_i = lon_deg / 180.0 + psi * np.sin(az) / np.cos(phi_i * np.pi)
+    phi_m = phi_i + 0.064 * np.cos((lam_i - 1.617) * np.pi)  # geomagnetic
+    t = (4.32e4 * lam_i + t_gps) % 86400.0             # local time at IPP
+    amp = max(sum(a[k] * phi_m ** k for k in range(4)), 0.0)
+    per = max(sum(b[k] * phi_m ** k for k in range(4)), 72000.0)
+    x = 2.0 * np.pi * (t - 50400.0) / per
+    F = 1.0 + 16.0 * (0.53 - E) ** 3                   # obliquity
+    if abs(x) < 1.57:
+        return F * (5e-9 + amp * (1.0 - x * x / 2.0 + x ** 4 / 24.0))
+    return F * 5e-9
+
+
+def tropo_delay(el):
+    """Simple troposphere mapping (meters): ~2.4 m zenith, grows toward
+    the horizon. Good to ~1 m above 15 deg elevation."""
+    return 2.47 / (np.sin(el) + 0.0121)
+
+
 def solve(sats):
     """sats = [(ecef_xyz, pseudorange_m)]. LS for (x,y,z,c*dt)."""
     x = np.array([0.0, 0.0, 0.0, 0.0])
@@ -265,6 +303,45 @@ def solve_snapshot(entries):
     return rms, lat, lon, h, total
 
 
+def solve_final(entries):
+    """solve_snapshot + atmospheric refinement. Troposphere always; the
+    Klobuchar ionosphere correction only when some bird's decode caught the
+    subframe-4 page-18 broadcast (it's one constellation-wide model, so any
+    bird's copy serves all). Corrections enter as transmit-time shifts:
+    pr - delay == C*(t_rx - (t_tx + delay/C)). Returns a result dict; the
+    uncorrected solve is kept alongside for honest A/B."""
+    rms0, lat0, lon0, h0, total = solve_snapshot(entries)
+    frac = [(-e["phi_ms"]) % 1.0 for e in entries]
+    N0 = [np.round(e["t_sv_coarse"] * 1e3 - f)
+          for e, f in zip(entries, frac)]
+
+    def assemble(extra):
+        prs = []
+        for k, e in enumerate(entries):
+            t_sv_tx = (N0[k] + total[k] + frac[k]) * 1e-3
+            prs.append((e["prn"], e["eph"],
+                        t_sv_tx - clock_corr(e["eph"], t_sv_tx) + extra[k]))
+        return prs
+
+    prs0 = assemble([0.0] * len(entries))
+    _, _, _, _, x0 = solve_prs(prs0)
+    iono = next((e["eph"] for e in entries
+                 if "iono_a" in e["eph"] and "iono_b" in e["eph"]), None)
+    extra, els = [], []
+    for prn, eph, t_tx in prs0:
+        az, el = az_el(x0[:3], sat_ecef(eph, t_tx))
+        els.append(round(float(np.degrees(el)), 1))
+        d = tropo_delay(el) / C
+        if iono is not None:
+            d += klobuchar(iono["iono_a"], iono["iono_b"], lat0, lon0,
+                           az, el, t_tx)
+        extra.append(d)
+    rms, lat, lon, h, x = solve_prs(assemble(extra))
+    return {"rms": rms, "lat": lat, "lon": lon, "h": h, "x": x,
+            "offsets": total, "raw_rms": rms0, "raw_h": h0,
+            "iono": iono is not None, "el_deg": els}
+
+
 def validate():
     """Decode our 2-bird capture, compute each satellite's ECEF at its toe,
     check the altitude is the GPS shell (~20,200 km). Proves the whole
@@ -308,15 +385,20 @@ def resolve_from_cache():
         entries.append({"prn": c["prn"], "eph": eph,
                         "t_sv_coarse": c["t_gps_tx_coarse"] + dt0,
                         "phi_ms": c["phi_ms"]})
-    rms, lat, lon, h, offs = solve_snapshot(entries)
+    res = solve_final(entries)
+    rms, lat, lon, h, offs = (res["rms"], res["lat"], res["lon"], res["h"],
+                              res["offsets"])
     (HERE / "lab_local" / "fix_result.json").write_text(_json.dumps({
         "lat": lat, "lon": lon, "alt_m": h,
         "birds": [e["prn"] for e in entries],
-        "resid_rms_m": rms, "ms_offsets": offs}, indent=1))
+        "resid_rms_m": rms, "ms_offsets": offs,
+        "iono_corrected": res["iono"], "el_deg": res["el_deg"]}, indent=1))
     sane = -500 < h < 5000
-    print(f"[resolve] residual rms {rms:,.1f} m, altitude "
+    print(f"[resolve] residual rms {rms:,.1f} m "
+          f"(uncorrected {res['raw_rms']:,.1f} m), altitude "
           f"{'PLAUSIBLE' if sane else 'IMPLAUSIBLE'} ({h:,.0f} m), "
-          f"ms offsets {offs}")
+          f"ms offsets {offs}, "
+          f"{'tropo+iono' if res['iono'] else 'tropo only'}")
     print("[resolve] coordinates in lab_local/fix_result.json (private)")
     return 0 if sane else 1
 
@@ -328,6 +410,8 @@ def main():
     ap.add_argument("--validate", action="store_true")
     ap.add_argument("--resolve", action="store_true",
                     help="re-run assembly+solve from lab_local cache")
+    ap.add_argument("--multi", type=int, default=1,
+                    help="solve at N snapshot epochs and average (shrinks noise)")
     a = ap.parse_args()
     if a.validate:
         return validate()
@@ -347,10 +431,10 @@ def main():
         return validate()
     # (4+ birds path) decode, pseudoranges from code phase + TOW, solve
     print("[fix] 4+ birds - decoding ephemerides + solving (fix -> lab_local/ only)")
-    return full_fix(a.iq, fs, det, dur)
+    return full_fix(a.iq, fs, det, dur, multi=a.multi)
 
 
-def full_fix(path, fs, det, dur):
+def full_fix(path, fs, det, dur, multi=1):
     """The final stage: coarse-time from each bird's nav-bit grid
     (millisecond-accurate subframe clocks) + sub-millisecond from a
     common-epoch acquisition snapshot -> pseudoranges -> solve().
@@ -380,21 +464,13 @@ def full_fix(path, fs, det, dur):
         print(f"[fix] only {len(birds)} birds fully decoded - need 4")
         return 1
 
-    # 2. common-epoch snapshot: sub-ms code phase for every bird at T_RX
-    T_RX = min(dur - 1.0, 45.0)
-    xsnap = load_seg(path, fs, T_RX, 0.310)
-    n1 = int(round(fs * 1e-3))
-    prs = []
-    cache = []
+    # 2. coarse SV clock, SELF-CALIBRATED, once per bird: every parity-clean
+    # subframe anchor is a (file-time, satellite-time) pair; a linear fit
+    # across them derives the exact mapping with no Doppler-sign assumptions,
+    # and the fit residual is a built-in truth check (microseconds = right,
+    # anything more = broken)
+    fits = {}
     for prn, (eph, tim) in birds.items():
-        r = acquire(xsnap, fs, [prn],
-                    np.array([tim["tr"]["fd"]]), 300)[prn]
-        phi_ms = (r["code_phase"] % n1) / fs * 1e3          # 0..1 ms
-        # coarse transmit clock, SELF-CALIBRATED: every parity-clean
-        # subframe anchor is a (file-time, satellite-time) pair; a
-        # linear fit across them derives the exact mapping with no
-        # Doppler-sign assumptions, and the fit residual is a built-in
-        # truth check (microseconds = right, anything more = broken)
         ft = np.array([1.0 + (tim["tent"] + 20.0 * i) * 1e-3
                        for i, _sf, _tw in tim["anchors"]], float)
         st = np.array([tw * 6.0 - 6.0 for _i, _sf, tw in tim["anchors"]],
@@ -403,39 +479,68 @@ def full_fix(path, fs, det, dur):
         fitres = float(np.std(st - (aa * ft + bb)))
         print(f"  PRN{prn}: anchor fit residual {fitres*1e6:.1f} us "
               f"(clock rate {aa - 1.0:+.2e})")
-        t_sv_at_rx = aa * T_RX + bb               # SV-CLOCK time (TOW is SV time)
-        # NOTE the assembly happens in SV time inside solve_snapshot(); the
-        # clock correction (af0/af1/af2 + relativistic) is applied AFTER the
-        # integer-ms + code-phase combination - code epochs align to SV-clock
-        # ms boundaries, and af0 alone can be +-0.5 ms (+-150 km) if
-        # subtracted first. Cache keeps the gps-corrected field for compat.
-        dt_sv = clock_corr(eph, t_sv_at_rx)
-        prs.append({"prn": prn, "eph": eph, "t_sv_coarse": t_sv_at_rx,
-                    "phi_ms": phi_ms})
-        cache.append({"prn": int(prn), "phi_ms": float(phi_ms),
-                      "t_gps_tx_coarse": float(t_sv_at_rx - dt_sv),
-                      "eph": {k: (float(v) if isinstance(v, (int, float))
-                                  else v)
-                              for k, v in eph.items() if k != "tows"}})
-        print(f"  PRN{prn}: snapshot code phase {phi_ms:.4f} ms, "
-              f"metric {r['metric']:.1f}")
+        fits[prn] = (aa, bb)
+    if any("iono_a" in eph for eph, _ in birds.values()):
+        print("  ionosphere: Klobuchar terms decoded (subframe 4 page 18)")
 
+    # 3. snapshot epochs: sub-ms code phase per bird at each T_RX, then
+    # SV-time assembly (t_sv_tx = N - phi) + integer search + atmos + solve.
+    # NOTE assembly happens in SV time inside solve_snapshot(); the clock
+    # correction (af0/af1/af2 + relativistic) applies AFTER the integer-ms +
+    # code-phase combination - code epochs align to SV-clock ms boundaries,
+    # and af0 alone can be +-0.5 ms (+-150 km) if subtracted first.
+    n1 = int(round(fs * 1e-3))
+    epochs = (np.linspace(10.0, dur - 2.0, multi) if multi > 1
+              else np.array([min(dur - 1.0, 45.0)]))
     import json as _json2
+    results, cache = [], []
+    for T_RX in epochs:
+        xsnap = load_seg(path, fs, T_RX, 0.310)
+        entries = []
+        for prn, (eph, tim) in birds.items():
+            r = acquire(xsnap, fs, [prn],
+                        np.array([tim["tr"]["fd"]]), 300)[prn]
+            phi_ms = (r["code_phase"] % n1) / fs * 1e3      # 0..1 ms
+            aa, bb = fits[prn]
+            t_sv_at_rx = aa * T_RX + bb       # SV-CLOCK time (TOW is SV time)
+            entries.append({"prn": prn, "eph": eph,
+                            "t_sv_coarse": t_sv_at_rx, "phi_ms": phi_ms})
+        if not cache:                          # cache the first epoch for --resolve
+            for e in entries:
+                dt_sv = clock_corr(e["eph"], e["t_sv_coarse"])
+                cache.append({"prn": int(e["prn"]),
+                              "phi_ms": float(e["phi_ms"]),
+                              "t_gps_tx_coarse": float(e["t_sv_coarse"] - dt_sv),
+                              "eph": {k: (float(v) if isinstance(v, (int, float))
+                                          else v)
+                                      for k, v in e["eph"].items()
+                                      if k != "tows"}})
+        res = solve_final(entries)
+        results.append(res)
+        print(f"  T={T_RX:5.1f}s: rms {res['rms']:,.1f} m, "
+              f"alt {res['h']:,.0f} m"
+              f"{' (tropo+iono)' if res['iono'] else ' (tropo only)'}")
+
     (HERE / "lab_local").mkdir(exist_ok=True)
     (HERE / "lab_local" / "prs_cache.json").write_text(_json2.dumps(cache))
-    # 3. SV-time assembly (t_sv_tx = N - phi) + integer-ms search + solve
-    rms, lat, lon, h, offs = solve_snapshot(prs)
-    out = HERE / "lab_local"
-    out.mkdir(exist_ok=True)
-    (out / "fix_result.json").write_text(_json.dumps({
+    # 4. average the sane epochs in ECEF; scatter = honest repeatability
+    good = [r for r in results if -500 < r["h"] < 5000] or results
+    P = np.array([r["x"][:3] for r in good])
+    scatter = float(np.linalg.norm(P.std(axis=0))) if len(good) > 1 else 0.0
+    lat, lon, h = ecef_to_llh(P.mean(axis=0))
+    rms = float(np.mean([r["rms"] for r in good]))
+    (HERE / "lab_local" / "fix_result.json").write_text(_json.dumps({
         "lat": lat, "lon": lon, "alt_m": h,
-        "birds": sorted(int(e["prn"]) for e in prs),
-        "resid_rms_m": rms, "ms_offsets": offs,
+        "birds": sorted(int(p) for p in birds),
+        "resid_rms_m": rms, "epochs_used": len(good),
+        "scatter_m": scatter, "iono_corrected": good[0]["iono"],
+        "el_deg": good[0]["el_deg"],
+        "ms_offsets": good[0]["offsets"],
         "capture": str(path)}, indent=1))
     sane = -500 < h < 5000
-    print(f"[fix] SOLVED with {len(prs)} birds: residual rms {rms:,.0f} m, "
-          f"altitude {'PLAUSIBLE' if sane else 'IMPLAUSIBLE'} "
-          f"({h:,.0f} m)")
+    print(f"[fix] SOLVED with {len(birds)} birds x {len(good)} epoch(s): "
+          f"mean rms {rms:,.1f} m, epoch scatter {scatter:,.1f} m, "
+          f"altitude {'PLAUSIBLE' if sane else 'IMPLAUSIBLE'} ({h:,.0f} m)")
     print(f"[fix] coordinates written to lab_local/fix_result.json "
           f"(gitignored - yours alone)")
     return 0

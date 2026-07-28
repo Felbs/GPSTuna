@@ -34,6 +34,16 @@ physics of the measurement, not a rounding of somebody else's answer.
   exhaustive integer-millisecond search scored by residual + altitude sanity.
 - **Ionospheric scintillation** (`scint.py`) — S4 + phase indices from the same
   tracking, as a space-weather bonus.
+- **Hears Galileo too.** `gal_e1.py` acquires Europe's constellation from the
+  same 1575.42 MHz capture — E1-B/E1-C BOC(1,1) replicas, 4 ms coherent × 40
+  noncoherent integration. First light: 4 Galileo birds confirmed in the same
+  90 s file as the GPS fix, each with both independent codes agreeing on code
+  phase and Doppler. (Spreading-code tables are fetched at runtime from
+  gnss-sdr's GPL sources with attribution — not embedded in this MIT repo.)
+- **Atmospheric corrections.** Troposphere always; Klobuchar ionosphere when
+  the subframe-4 page-18 broadcast is caught (12.5-min cycle — capture long
+  enough and it's guaranteed). `--multi N` solves at N snapshot epochs and
+  averages in ECEF, with the epoch scatter reported as the honest error bar.
 
 ### Three lessons the working fix taught us (so you don't relearn them)
 1. **Code phase points at the *next* code epoch** — transmit time assembles as

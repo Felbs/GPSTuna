@@ -78,7 +78,7 @@ def main():
     # full pipeline: nav decode with timing anchors -> common-epoch snapshot
     # code phases -> SV-time pseudorange assembly -> least-squares solve.
     # The fix is written ONLY to lab_local/fix_result.json (gitignored).
-    rc = full_fix(path, FS, strong, dur)
+    rc = full_fix(path, FS, strong, dur, multi=5)
     if rc:
         print("[locate] not enough complete orbits - a longer capture (300 s)")
         print("         usually gets the remaining subframes; retry.")

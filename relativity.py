@@ -291,6 +291,19 @@ def parse_harvest(harvest):
                 put("OmegaDot", sbits(W[8], 1, 24) * 2 ** -43 * np.pi)
             if 9 in W:
                 put("IDOT", sbits(W[9], 9, 22) * 2 ** -43 * np.pi)
+        elif sfid == 4:
+            # page 18 (SV/page ID 56 in word 3 bits 3-8) carries the Klobuchar
+            # ionosphere model: alpha0..3 (amplitude) + beta0..3 (period).
+            # Broadcast once per 12.5 min, so short captures may lack it.
+            if 3 in W and 4 in W and 5 in W and ubits(W[3], 3, 8) == 56:
+                put("iono_a", [sbits(W[3], 9, 16) * 2 ** -30,
+                               sbits(W[3], 17, 24) * 2 ** -27,
+                               sbits(W[4], 1, 8) * 2 ** -24,
+                               sbits(W[4], 9, 16) * 2 ** -24])
+                put("iono_b", [sbits(W[4], 17, 24) * 2 ** 11,
+                               sbits(W[5], 1, 8) * 2 ** 14,
+                               sbits(W[5], 9, 16) * 2 ** 16,
+                               sbits(W[5], 17, 24) * 2 ** 16])
     return eph
 
 
