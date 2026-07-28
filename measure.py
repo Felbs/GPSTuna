@@ -119,8 +119,18 @@ def acquire(x, fs, prns, dopplers, n_noncoh):
         mask = np.ones(m.shape[1], dtype=bool)
         for off in range(-excl, excl + 1):
             mask[(ci + off) % m.shape[1]] = False
+        # sub-sample peak (parabolic on the power triplet): one integer
+        # sample is 146 m of pseudorange at 2.048 MS/s - the fractional
+        # peak recovers most of it. code_phase stays int for all existing
+        # consumers; code_phase_f is the refined value for solvers.
+        row = m[di]
+        y1, y2, y3 = (row[(ci - 1) % len(row)], row[ci],
+                      row[(ci + 1) % len(row)])
+        den = y1 - 2.0 * y2 + y3
+        frac = float(np.clip(0.5 * (y1 - y3) / den, -0.5, 0.5)) if den else 0.0
         out[p] = dict(metric=float(m[di, ci] / m[:, mask].max()),
                       dopp=float(dopplers[di]), code_phase=int(ci),
+                      code_phase_f=float(ci + frac),
                       peak_over_floor=float(m[di, ci] / np.median(m)))
     return out
 

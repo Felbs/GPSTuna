@@ -482,6 +482,17 @@ def full_fix(path, fs, det, dur, multi=1):
         fits[prn] = (aa, bb)
     if any("iono_a" in eph for eph, _ in birds.values()):
         print("  ionosphere: Klobuchar terms decoded (subframe 4 page 18)")
+    else:
+        # short captures rarely span the 12.5-min page cycle - fall back to
+        # the newest archived broadcast (constellation-wide, slowly varying)
+        _if = HERE / "lab_local" / "iono_terms.json"
+        if _if.exists():
+            _io = _json.loads(_if.read_text())
+            for eph, _t in birds.values():
+                eph["iono_a"] = _io["iono_a"]
+                eph["iono_b"] = _io["iono_b"]
+            print(f"  ionosphere: archived Klobuchar terms applied "
+                  f"({_io.get('src', 'unknown src')})")
 
     # 3. snapshot epochs: sub-ms code phase per bird at each T_RX, then
     # SV-time assembly (t_sv_tx = N - phi) + integer search + atmos + solve.
@@ -500,7 +511,8 @@ def full_fix(path, fs, det, dur, multi=1):
         for prn, (eph, tim) in birds.items():
             r = acquire(xsnap, fs, [prn],
                         np.array([tim["tr"]["fd"]]), 300)[prn]
-            phi_ms = (r["code_phase"] % n1) / fs * 1e3      # 0..1 ms
+            cp = r.get("code_phase_f", r["code_phase"])     # sub-sample
+            phi_ms = (cp % n1) / fs * 1e3                   # 0..1 ms
             aa, bb = fits[prn]
             t_sv_at_rx = aa * T_RX + bb       # SV-CLOCK time (TOW is SV time)
             entries.append({"prn": prn, "eph": eph,

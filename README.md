@@ -1,15 +1,22 @@
-# GPSTuna 🛰️ — a software GPS receiver from raw SDR IQ
+# GPSTuna 🛰️ — a software GPS *and Galileo* receiver from raw SDR IQ
 
-Point any SDR at 1575.42 MHz, record 90 seconds of the raw L1 hiss, and this
-turns it into satellite orbits, a relativity experiment, and your position.
-No GPS chip; just the antenna, the radio, and the math.
+Point any SDR at 1575.42 MHz, record the raw L1 hiss, and this turns it into
+satellite orbits, a relativity experiment, Galileo's navigation message, and
+your position. No GPS chip; just the antenna, the radio, and the math.
 
-**Status: it works.** From a single 90 s capture on a cheap active patch
-antenna in an attic, the full chain — acquisition → tracking → 50 bps nav
-decode → ephemerides → pseudoranges → least-squares — produced a **7-satellite
-position fix with 57 m residual rms** and a plausible altitude. Single
-frequency, no ionosphere correction, one snapshot: that residual is the honest
-physics of the measurement, not a rounding of somebody else's answer.
+**Status: dual-constellation.** From captures on a cheap active patch antenna
+in an attic:
+- **GPS position fix at ~45 m mean residual with 14 m repeatability** — full
+  chain: acquisition → tracking → 50 bps nav decode → ephemerides (including
+  the broadcast Klobuchar ionosphere model, decoded off the air) → sub-sample
+  pseudoranges → least-squares, averaged across snapshot epochs.
+- **Galileo E1-B I/NAV fully decoded** — 1161/1161 pages CRC-clean across
+  three satellites, **Galileo System Time read off the air** and verified
+  against the capture's own wall-clock timestamp to the second.
+- One tracked bird turned out to be **E14 — one of the 2014 wrong-orbit
+  eccentric satellites used for the classic gravitational-redshift tests**;
+  the decoder read its elliptical ephemeris (e = 0.168) and its do-not-use
+  health flag straight off the air.
 
 ## What it does
 - **Decodes the GPS nav message** from your own capture — ephemeris, clock terms,
@@ -40,6 +47,16 @@ physics of the measurement, not a rounding of somebody else's answer.
   90 s file as the GPS fix, each with both independent codes agreeing on code
   phase and Doppler. (Spreading-code tables are fetched at runtime from
   gnss-sdr's GPL sources with attribution — not embedded in this MIT repo.)
+- **Reads Galileo's navigation message.** `gal_inav.py` is the full I/NAV
+  chain: E1-C pilot tracking (CS25 secondary-code wipeoff → pure PLL) →
+  E1-B 250 sym/s soft symbols → preamble sync → 8×30 deinterleave → soft
+  Viterbi (K=7, 171/133 octal, second branch inverted per the ICD) →
+  CRC-24Q. Includes a `--selftest` that synthesizes a complete E1 signal and
+  recovers injected time exactly.
+- **Calibrates your SDR's crystal.** Measured carrier Doppler minus the
+  Doppler predicted from decoded ephemerides (at your solved position) gives
+  the oscillator error directly — ours: +797 ppb with 2.3 Hz agreement
+  across seven satellites. Every future frequency measurement inherits it.
 - **Atmospheric corrections.** Troposphere always; Klobuchar ionosphere when
   the subframe-4 page-18 broadcast is caught (12.5-min cycle — capture long
   enough and it's guaranteed). `--multi N` solves at N snapshot epochs and
@@ -93,13 +110,59 @@ python locate.py                                       # one command: capture ->
 python measure.py  --iq your_capture.cs16 --selftest   # sanity (synthetic -20 dB)
 python relativity.py --iq your_capture.cs16            # decode Einstein
 python fix.py --validate                               # satellite-position math
-python fix.py --iq your_capture.cs16                   # position fix (>=4 birds)
+python fix.py --iq your_capture.cs16 --multi 8         # fix, averaged over 8 epochs
 python fix.py --resolve                                # re-solve from cache in seconds
+python gal_e1.py  --iq your_capture.cs16               # Galileo acquisition
+python gal_inav.py --iq your_capture.cs16 --prn 29     # Galileo I/NAV decode
 ```
-Capture tip: an antenna at a window or a ~$10 active GPS patch antenna (bias-T
-powered) sees 7–12 satellites; deep indoors you may see only 1–3. `--resolve`
-reuses the cached pseudoranges from the last full run, so experimenting with
-the solve never costs another 15-minute decode.
+`--resolve` reuses the cached pseudoranges from the last full run, so
+experimenting with the solve never costs another decode.
+
+## Recreating this — the field guide
+
+**Hardware floor:** any SDR that does 2.048 MS/s complex at 1575.42 MHz, plus
+a ~$10–20 **active** GPS patch antenna powered by bias-T. An attic works; a
+window works better; deep indoors gets 1–3 birds (not enough). 7–12 birds is
+normal with sky view.
+
+**Capture recipes (each unlocked something):**
+- **90 s @ 2.048 MS/s** → GPS fix. Enough for ephemerides (subframes repeat
+  every 30 s) and multi-epoch averaging.
+- **13 min** → the ionosphere page. Klobuchar terms live in subframe 4
+  page 18, broadcast once per 12.5 minutes — a short capture will usually
+  miss them (ours did). One long capture per day is plenty; the terms are
+  constellation-wide and change slowly (`fix.py` archives and reuses them).
+- **Wideband (4 MS/s+)** → Galileo. E1's BOC(1,1) main lobes sit at
+  ±1.023 MHz, exactly on a 2.048 MS/s capture's edge; at 2.048 you'll only
+  see strong birds several dB down, at 4.096 you get the real constellation.
+
+**Hard-won lessons (each one was a bug or a discovery here):**
+1. *Assemble pseudoranges in satellite-clock time.* Code epochs align to the
+   SV's own millisecond boundaries; apply clock corrections after the
+   integer+fraction assembly, never before (af0 alone spans ±150 km).
+2. *Code phase points at the next code epoch* — transmit time is N − φ.
+3. *Never trust `round()` for the integer millisecond* — pin one reference
+   bird and exhaustively search relative integers, scored by residual +
+   altitude sanity.
+4. *Interpolate the correlation peak.* An integer-sample code phase is ±73 m
+   of quantization at 2.048 MS/s; a three-point parabola through the peak
+   collapsed our epoch scatter from 79 m to 14 m. The cheapest accuracy you
+   will ever buy.
+5. *Validate orbits in full 3D* against SGP4-propagated TLEs — a radius-only
+   check passes with the ascending node pointing the wrong way.
+6. *The first couple of minutes of a fresh capture may be junk* (AGC and
+   thermal settle, buffering) — our 13-minute capture was corrupted early and
+   pristine (100% word parity) late. Judge segments separately; count your
+   stream's overflow returns.
+7. *Sub-frame word arrays are 0-indexed from TLM* — subframe "word 3" is
+   `W[2]`. Our page-18 parser looked in word 4 for a whole night.
+8. *A decode that matches truth through a broken frame sync is luck, not
+   skill.* Re-derive, don't celebrate early.
+
+**The accuracy ladder, honestly:** 57 m (first fix) → 43 m (troposphere +
+decoded ionosphere) → **45 m mean with 14 m epoch scatter** (sub-sample code
+phase + 8-epoch ECEF averaging). Next rungs: carrier-phase smoothing, a
+joint GPS+Galileo solve, WAAS corrections.
 
 ## Privacy
 `fix.py` writes any computed position **only** to `lab_local/` (gitignored). The
