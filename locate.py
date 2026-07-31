@@ -35,15 +35,28 @@ def capture(secs=180, antenna="Antenna A"):
     from SoapySDR import SOAPY_SDR_RX
     sdr, st = cw._open_sdr(antenna, FS)
     sdr.setFrequency(SOAPY_SDR_RX, 0, 1575.42e6)
-    for key in ("biasT_ctrl", "biasT", "bias_tee"):     # power an ACTIVE GPS antenna
+    # Power an ACTIVE GPS antenna. These are boolean settings: SoapySDRPlay3
+    # reads only the exact string "false" as off and treats everything else --
+    # including "0" -- as ON, so the literals here are load-bearing.
+    for key in ("biasT_ctrl", "biasT", "bias_tee"):
         try:
             sdr.writeSetting(key, "true")
         except Exception:
             pass
-    time.sleep(0.5)
-    iq = cw._grab(sdr, st, secs, FS)
-    sdr.deactivateStream(st)
-    sdr.closeStream(st)
+    try:
+        time.sleep(0.5)
+        iq = cw._grab(sdr, st, secs, FS)
+    finally:
+        # Hand the coax back de-powered even if the grab throws. Otherwise the
+        # next thing plugged into this port -- a passive antenna, a filter, a
+        # borrowed radio -- meets DC that nothing turned off.
+        for key in ("biasT_ctrl", "biasT", "bias_tee"):
+            try:
+                sdr.writeSetting(key, "false")
+            except Exception:
+                pass
+        sdr.deactivateStream(st)
+        sdr.closeStream(st)
     LOCAL.mkdir(exist_ok=True)
     fn = LOCAL / "sky_capture.cs16"
     inter = np.empty(2 * len(iq), np.int16)
