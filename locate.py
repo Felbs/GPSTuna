@@ -45,7 +45,7 @@ def capture(secs=180, antenna="Antenna A"):
             pass
     try:
         time.sleep(0.5)
-        iq = cw._grab(sdr, st, secs, FS)
+        iq = cw._grab(sdr, st, secs, FS, max_stall_s=60)
     finally:
         # Hand the coax back de-powered even if the grab throws. Otherwise the
         # next thing plugged into this port -- a passive antenna, a filter, a
