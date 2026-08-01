@@ -49,6 +49,15 @@ active patch antenna in an attic:
   exhaustive integer-millisecond search scored by residual + altitude sanity.
 - **Ionospheric scintillation** (`scint.py`) — S4 + phase indices from the same
   tracking, as a space-weather bonus.
+- **Digs 6 dB deeper when asked.** `lab/gps_deep_acquire.py` extends the
+  1 ms acquisition to 5 ms coherent × 100 noncoherent — measured **+6 dB**
+  by burying a known-good capture in calibrated noise until each search
+  breaks (baseline dies at +6 dB added noise, deep still holds all 7
+  satellites there, plus one more the baseline never saw). Lab-grade for
+  now — not yet the automatic fallback in `locate.py`. The same file shows
+  the diagnosis ladder that separates "blind antenna" from "marginal sky":
+  a zero at −6 dB is a much stronger zero.
+
 - **Hears Galileo too.** `gal_e1.py` acquires Europe's constellation from the
   same 1575.42 MHz capture — E1-B/E1-C BOC(1,1) replicas, 4 ms coherent × 40
   noncoherent integration. First light: 4 Galileo birds confirmed in the same

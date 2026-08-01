@@ -1,0 +1,44 @@
+C/A generator self-check (published octal values):
+  PRN 1 first-10-chips octal: 1440 (published 1440) OK
+  PRN 2 first-10-chips octal: 1620 (published 1620) OK
+  PRN 3 first-10-chips octal: 1710 (published 1710) OK
+  PRN 4 first-10-chips octal: 1744 (published 1744) OK
+  PRN 5 first-10-chips octal: 1133 (published 1133) OK
+
+===== P1: known-good 7/27 attic capture =====
+  baseline (1 ms x 300): 7 birds  [22 s]
+  deep   (5 ms x 100): 8 birds  [63 s]
+    PRN    base    deep   gain
+      2    1.45    5.16    3.56x   deep-only
+      3    7.55   25.56    3.39x
+     10    5.16   16.79    3.26x
+     25    6.57   30.27    4.60x
+     26    5.40   11.38    2.11x
+     28   28.10   64.43    2.29x
+     31   24.38   59.28    2.43x
+     32    4.08   10.18    2.49x
+
+===== sensitivity ladder (known-good + synthetic noise) =====
+    added  base birds  deep birds
+  +   0 dB           7           8
+  +   3 dB           6           7
+  +   6 dB           2           7
+  +   9 dB           2           5
+  +  12 dB           0           2
+  +  15 dB           0           2
+
+===== P3a: today, bias-T verified ON (A/B capture) =====
+  baseline (1 ms x 300): 0 birds  [22 s]
+  deep   (5 ms x 100): 0 birds  [61 s]
+
+===== P3b: today, replicated 7/27 front-end config =====
+  baseline (1 ms x 300): 0 birds  [22 s]
+  deep   (5 ms x 100): 0 birds  [62 s]
+
+Done. Interpret against the pre-registered predictions in the docstring — they were written before any of this ran.
+  baseline (1 ms x 300): 0 birds  [22 s]
+  deep   (5 ms x 100): 0 birds  [62 s]
+
+===== P3b: today, replicated front-end =====
+  baseline (1 ms x 300): 0 birds  [21 s]
+  deep   (5 ms x 100): 0 birds  [59 s]
