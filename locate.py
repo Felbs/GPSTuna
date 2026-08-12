@@ -20,6 +20,15 @@ from pathlib import Path
 
 import numpy as np
 
+# A 300 s capture followed by a long decode looks HUNG when stdout is a file
+# rather than a terminal, because Python block-buffers it and nothing appears
+# until the process exits. Anyone redirecting this to a log -- which is the
+# natural thing to do with a run this long -- deserves to see it working.
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except Exception:                                                # noqa: BLE001
+    pass
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from measure import acquire, load_seg, require_capture
