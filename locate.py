@@ -84,27 +84,49 @@ def _open_sdr(antenna, fs):
     return sdr, st
 
 
-def _grab(sdr, st, secs, fs, max_stall_s=60):
-    """Read `secs` of complex baseband. -> np.complex64"""
+def _grab_to_file(sdr, st, secs, fs, path, max_stall_s=60):
+    """Stream `secs` of baseband to `path` as interleaved int16.
+
+    Written to disk as it arrives rather than accumulated in memory. The
+    obvious version buffers the whole capture as complex64 first, which is
+    8 bytes per sample: a 600 s capture at 2.048 Msps is 9.8 GB, fine on a
+    workstation and fatal on a 8 GB Raspberry Pi, where it drives the machine
+    into swap and then the OOM killer. Streaming makes the memory cost the
+    chunk size instead of the capture length, so the only limit left is disk
+    -- and the file was going to be written anyway, at half the size, because
+    int16 is 4 bytes per sample.
+    """
     want = int(secs * fs)
-    out = np.empty(want, np.complex64)
-    chunk = np.empty(8192, np.complex64)
+    chunk = np.empty(65536, np.complex64)
+    inter = np.empty(2 * len(chunk), np.int16)
     got = 0
     last_progress = time.time()
-    while got < want:
-        sr = sdr.readStream(st, [chunk], len(chunk), timeoutUs=1000000)
-        n = getattr(sr, "ret", sr if isinstance(sr, int) else -1)
-        if n > 0:
-            n = min(n, want - got)
-            out[got:got + n] = chunk[:n]
-            got += n
-            last_progress = time.time()
-        elif time.time() - last_progress > max_stall_s:
-            raise SystemExit(
-                f"\nThe radio stopped delivering samples after {got/fs:.1f} s "
-                f"({got}/{want}).\nThis is usually USB: try a short, direct "
-                f"USB 3.0 cable and no hub.\n")
-    return out
+    next_note = 60.0
+    t0 = time.time()
+    with open(path, "wb") as fh:
+        while got < want:
+            sr = sdr.readStream(st, [chunk], len(chunk), timeoutUs=1000000)
+            n = getattr(sr, "ret", sr if isinstance(sr, int) else -1)
+            if n > 0:
+                n = min(n, want - got)
+                inter[0:2 * n:2] = np.clip(chunk[:n].real * 32767,
+                                           -32768, 32767).astype(np.int16)
+                inter[1:2 * n:2] = np.clip(chunk[:n].imag * 32767,
+                                           -32768, 32767).astype(np.int16)
+                inter[:2 * n].tofile(fh)
+                got += n
+                last_progress = time.time()
+                el = time.time() - t0
+                if el >= next_note:
+                    print(f"[locate] captured {got/fs:6.0f} s of {secs:.0f} s "
+                          f"({got*4/1e9:.2f} GB)", flush=True)
+                    next_note += 60.0
+            elif time.time() - last_progress > max_stall_s:
+                raise SystemExit(
+                    f"\nThe radio stopped delivering samples after "
+                    f"{got/fs:.1f} s ({got}/{want}).\nThis is usually USB: try "
+                    f"a short, direct USB 3.0 cable and no hub.\n")
+    return got
 
 
 def capture(secs=180, antenna="Antenna A"):
@@ -134,9 +156,11 @@ def capture(secs=180, antenna="Antenna A"):
               "patch antenna needs it;\n"
               "         without it expect to acquire a few birds but fail to "
               "decode their orbits.")
+    LOCAL.mkdir(exist_ok=True)
+    fn = LOCAL / "sky_capture.cs16"
     try:
         time.sleep(0.5)
-        iq = _grab(sdr, st, secs, FS, max_stall_s=60)
+        got = _grab_to_file(sdr, st, secs, FS, fn, max_stall_s=60)
     finally:
         # Hand the coax back de-powered even if the grab throws. Otherwise the
         # next thing plugged into this port -- a passive antenna, a filter, a
@@ -148,12 +172,8 @@ def capture(secs=180, antenna="Antenna A"):
                 pass
         sdr.deactivateStream(st)
         sdr.closeStream(st)
-    LOCAL.mkdir(exist_ok=True)
-    fn = LOCAL / "sky_capture.cs16"
-    inter = np.empty(2 * len(iq), np.int16)
-    inter[0::2] = np.clip(iq.real * 32767, -32768, 32767).astype(np.int16)
-    inter[1::2] = np.clip(iq.imag * 32767, -32768, 32767).astype(np.int16)
-    inter.tofile(fn)
+    print(f"[locate] captured {got/FS:.0f} s -> {fn} "
+          f"({fn.stat().st_size/1e9:.2f} GB)", flush=True)
     return str(fn)
 
 
