@@ -36,6 +36,7 @@ Privacy: no position computation. Time/ephemeris parameters printed.
 The capture is opened strictly read-only (np.memmap mode "r") and
 streamed in 4 ms blocks -- the 12.8 GB file is never loaded whole.
 """
+from measure import require_capture
 import argparse
 import sys
 import time
@@ -542,6 +543,7 @@ def main():
     fs = a.fs
     prns = [int(p) for p in a.prns.split(",")]
     codes_b, codes_c = load_codes()
+    require_capture(a.iq)
     mm = np.memmap(a.iq, dtype=np.int16, mode="r")
     file_dur = mm.size / 2 / fs
     dur = min(a.dur, file_dur - a.t0 - 1.5)

@@ -18,7 +18,7 @@ import numpy as np
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from measure import acquire, load_seg, track_sv
+from measure import acquire, load_seg, track_sv, require_capture
 from relativity import clean_carrier, prompt_stream
 
 CAPS = [
@@ -48,6 +48,7 @@ def main():
         path = HERE / cap
         if not path.exists():
             continue
+        require_capture(str(path))
         dur = path.stat().st_size / 4 / FS
         x = load_seg(str(path), FS, 0.5, 0.310)
         for prn in prns:

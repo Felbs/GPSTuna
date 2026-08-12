@@ -145,10 +145,41 @@ flowchart TD
   WORDS --> E14["the E14 catch: eccentric orbit e=0.168<br/>+ do-not-use flag — the gravitational-redshift<br/>test satellite, decoded from an attic"]
 ```
 
+## Install
+```bash
+git clone https://github.com/Felbs/GPSTuna.git
+cd GPSTuna
+pip install -r requirements.txt        # numpy + scipy, that is all
+python measure.py --selftest           # proves the install with no radio, no capture
+```
+The self-test needs nothing but Python: it checks the C/A code generator
+against the octal values printed in IS-GPS-200 and then acquires a synthetic
+PRN buried at −20 dB. If that passes, the decoder works.
+
+## Getting a capture
+**Every other command needs raw L1 IQ, and no sample capture ships with this
+repo — a GPS recording encodes the position and time it was made, so
+publishing one publishes a location.** Record your own:
+
+| setting | value |
+|---|---|
+| centre frequency | 1575.42 MHz (GPS L1) |
+| sample rate | 2.048 Msps |
+| format | interleaved `int16` (I,Q) — a `.cs16` file |
+| length | 60 s minimum; 180 s to decode ephemerides comfortably |
+| antenna | **active GPS patch** with a clear view of the sky, bias-T powered |
+
+Any SDR tool that writes interleaved int16 will do. If you have SoapySDR
+installed, `python locate.py` does the whole thing — capture, acquire, fix —
+in one command.
+
+> An indoor capture through a window usually acquires nothing. GPS arrives
+> below the noise floor; the antenna is the whole game.
+
 ## Run it
 ```bash
 python locate.py                                       # one command: capture -> count -> fix
-python measure.py  --iq your_capture.cs16 --selftest   # sanity (synthetic -20 dB)
+python measure.py --selftest                           # sanity, no capture needed (synthetic -20 dB)
 python relativity.py --iq your_capture.cs16            # decode Einstein
 python fix.py --validate                               # satellite-position math
 python fix.py --iq your_capture.cs16 --multi 8         # fix, averaged over 8 epochs

@@ -1,0 +1,17 @@
+# GPSTuna — Python dependencies
+#
+#   pip install -r requirements.txt
+#
+# numpy and scipy are all the decoding needs. Everything else is optional.
+
+numpy>=1.24
+scipy>=1.10
+
+# OPTIONAL — only for capturing from a radio yourself (locate.py).
+# Not installable from PyPI on most platforms: SoapySDR ships with your SDR
+# vendor's package, or via conda/apt (python3-soapysdr). If you already have a
+# capture file, you do not need it.
+#   SoapySDR
+
+# OPTIONAL — only for lab/gps_deep_acquire.py cross-checks against TLEs.
+#   sgp4>=2.20

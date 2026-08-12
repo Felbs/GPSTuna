@@ -135,7 +135,31 @@ def acquire(x, fs, prns, dopplers, n_noncoh):
     return out
 
 
+def require_capture(path):
+    """Fail with an explanation instead of a FileNotFoundError traceback.
+
+    Every tool here needs raw L1 IQ, and no sample capture ships with the
+    repo -- see the README: a GPS recording encodes where and when it was
+    made, so publishing one would publish a position.
+    """
+    import os as _os
+    if path and _os.path.exists(path):
+        return path
+    raise SystemExit(
+        f"\nNo IQ capture at:\n    {path}\n\n"
+        "These tools read raw GPS L1 baseband; none ships with the repo\n"
+        "(a capture encodes the position and time it was made).\n\n"
+        "  * record your own -- 1575.42 MHz, 2.048 Msps, interleaved int16,\n"
+        "    an active GPS patch antenna with sky view, 60 s or more:\n"
+        "        python locate.py                 # if you have SoapySDR\n"
+        "  * then point any tool at it:\n"
+        "        python measure.py --iq your_capture.cs16\n\n"
+        "To check the install with no radio and no capture:\n"
+        "        python measure.py --selftest\n")
+
+
 def load_seg(path, fs, t0_s, dur_s):
+    require_capture(path)
     n0 = int(t0_s * fs) * 2
     n = int(dur_s * fs) * 2
     raw = np.memmap(path, dtype=np.int16, mode="r")[n0:n0 + n].astype(np.float32)
@@ -302,6 +326,7 @@ def main():
         raise SystemExit("--iq required (or --selftest)")
 
     fs = a.fs
+    require_capture(a.iq)
     dur_s = Path(a.iq).stat().st_size / 4 / fs
     dop = np.arange(-7000, 7001, 250.0)
 

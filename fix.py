@@ -357,6 +357,8 @@ def validate():
     # validate the ECEF math on the PROVEN-good navbits capture (PRN15 fully
     # decodes there); the 2-bird fix capture is weaker.
     path = str(HERE.parent / "captures" / "gps_l1_navbits.cs16")
+    from measure import require_capture
+    require_capture(path)
     dur = Path(path).stat().st_size / 4 / fs
     x = load_seg(path, fs, 0.5, 0.310)
     acq = acquire(x, fs, list(range(1, 33)), np.arange(-7000, 7001, 250.0), 300)
@@ -425,6 +427,7 @@ def main():
     if a.resolve:
         return resolve_from_cache()
     fs = a.fs
+    require_capture(a.iq)
     dur = Path(a.iq).stat().st_size / 4 / fs
     x = load_seg(a.iq, fs, 0.5, 0.310)
     acq = acquire(x, fs, list(range(1, 33)), np.arange(-7000, 7001, 250.0), 300)

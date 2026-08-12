@@ -64,7 +64,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import joint_fix
 from joint_fix import EPOCHS, FS, GAL_T0, LAB, PATH, _load_cache
-from measure import CODE_RATE, FL1, load_seg, sampled_code
+from measure import CODE_RATE, FL1, load_seg, sampled_code, require_capture
 from measure import acquire as gps_acquire
 import gal_e1
 from gal_e1 import T_COH, boc_replica, load_codes
@@ -204,6 +204,7 @@ def stage_gps(only_prn=None):
 def stage_gal(only_prn=None):
     birds = _load_cache("joint_gal_prn*.json")
     codes_b, codes_c = load_codes()
+    require_capture(PATH)
     mm = np.memmap(PATH, dtype=np.int16, mode="r")
     times = _grid_times()
     for b in birds:

@@ -26,7 +26,7 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from measure import (CODE_RATE, C_LIGHT, FL1, THRESH, acquire, bit_tent,
-                     load_seg, sampled_code, track_sv)
+                     load_seg, require_capture, sampled_code, track_sv)
 
 MU = 3.986005e14                 # WGS-84 earth GM (m^3/s^2) - the IS-GPS value
 F_REL = -4.442807633e-10         # s / sqrt(m)  (IS-GPS-200 relativistic constant)
@@ -394,6 +394,7 @@ def main():
     ap.add_argument("--fs", type=float, default=2.048e6)
     a = ap.parse_args()
     fs = a.fs
+    require_capture(a.iq)
     dur_s = Path(a.iq).stat().st_size / 4 / fs
     print(f"[rel] capture {Path(a.iq).name}: {dur_s:.0f} s @ {fs/1e6} MHz")
     x = load_seg(a.iq, fs, 0.5, 0.310)

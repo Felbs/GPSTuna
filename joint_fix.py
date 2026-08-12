@@ -50,7 +50,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import fix
 from fix import C, OMEGA_E, clock_corr, ecef_to_llh, sat_ecef
-from measure import acquire as gps_acquire
+from measure import acquire as gps_acquire, require_capture
 from measure import bit_tent, load_seg, prompts_ms
 from relativity import (bit_sums, clean_carrier, costas, find_grid,
                         harvest_words, parity_ok, parse_harvest,
@@ -77,6 +77,7 @@ EPOCHS = np.linspace(305.0, 765.0, 8)
 # ------------------------------------------------------------ stage: galileo
 def stage_gal(prn):
     codes_b, codes_c = load_codes()
+    require_capture(PATH)
     mm = np.memmap(PATH, dtype=np.int16, mode="r")
     x = load_seg(PATH, FS, GAL_T0, 40 * T_COH + 0.01)
     rep = {prn: boc_replica(codes_c[prn], FS)}

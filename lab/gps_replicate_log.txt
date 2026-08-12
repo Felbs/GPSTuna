@@ -1,0 +1,6 @@
+16:35:25 ==================================================================
+16:35:25 GPS replicate: live capture through the proven 7/27 path
+16:35:25   cw._open_sdr defaults -> IFGR 30, rfgain_sel 0, CS16, 2.048 MHz
+16:35:25   bias-T now writes 'true'/'false' and is restored in a finally
+16:35:25 capturing 120 s on Antenna B ...
+16:40:04 lock released

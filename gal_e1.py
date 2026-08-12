@@ -44,6 +44,7 @@ Usage:
 Privacy: acquisition only -- prints PRN / Doppler / metric. No position
 solving, nothing written outside the repo tree.
 """
+from measure import require_capture
 import argparse
 import re
 import urllib.request
@@ -176,6 +177,7 @@ def acquire(x, fs, replicas, dopplers, n_noncoh):
 def load_seg(path, fs, t0_s, dur_s):
     n0 = int(t0_s * fs) * 2
     n = int(dur_s * fs) * 2
+    require_capture(path)
     raw = np.memmap(path, dtype=np.int16, mode="r")[n0:n0 + n].astype(np.float32)
     x = raw[0::2] + 1j * raw[1::2]
     return x - x.mean()

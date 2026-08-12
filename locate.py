@@ -22,18 +22,81 @@ import numpy as np
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from measure import acquire, load_seg
+from measure import acquire, load_seg, require_capture
 from fix import full_fix
 
 FS = 2.048e6
 LOCAL = HERE / "lab_local"
 
 
+def _open_sdr(antenna, fs):
+    """Open the first SoapySDR device at `fs`, return (device, active stream).
+
+    Self-contained on purpose: this used to import a helper from a sibling
+    project by absolute path, which meant `locate.py` could only ever run on
+    one machine.
+    """
+    try:
+        import SoapySDR
+        from SoapySDR import SOAPY_SDR_RX, SOAPY_SDR_CF32
+    except ImportError:
+        raise SystemExit(
+            "\nCapturing from a radio needs SoapySDR, which is not importable "
+            "from this Python.\n\n"
+            "  * install SoapySDR plus a driver for your radio, or\n"
+            "  * record 1575.42 MHz yourself with any SDR tool and pass the "
+            "file:\n"
+            "        python locate.py --iq your_capture.cs16\n\n"
+            "See the README (\"Getting a capture\") for the recording "
+            "settings.\n")
+
+    devices = SoapySDR.Device.enumerate()
+    if not devices:
+        raise SystemExit(
+            "\nSoapySDR is installed but found no radio.\n"
+            "Check that the device is plugged in and not held open by another "
+            "program.\n")
+    sdr = SoapySDR.Device(devices[0])
+    sdr.setSampleRate(SOAPY_SDR_RX, 0, fs)
+    if antenna:
+        try:
+            sdr.setAntenna(SOAPY_SDR_RX, 0, antenna)
+        except Exception:
+            # Antenna naming is per-driver; a wrong name is not fatal.
+            pass
+    st = sdr.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32)
+    sdr.activateStream(st)
+    return sdr, st
+
+
+def _grab(sdr, st, secs, fs, max_stall_s=60):
+    """Read `secs` of complex baseband. -> np.complex64"""
+    want = int(secs * fs)
+    out = np.empty(want, np.complex64)
+    chunk = np.empty(8192, np.complex64)
+    got = 0
+    last_progress = time.time()
+    while got < want:
+        sr = sdr.readStream(st, [chunk], len(chunk), timeoutUs=1000000)
+        n = getattr(sr, "ret", sr if isinstance(sr, int) else -1)
+        if n > 0:
+            n = min(n, want - got)
+            out[got:got + n] = chunk[:n]
+            got += n
+            last_progress = time.time()
+        elif time.time() - last_progress > max_stall_s:
+            raise SystemExit(
+                f"\nThe radio stopped delivering samples after {got/fs:.1f} s "
+                f"({got}/{want}).\nThis is usually USB: try a short, direct "
+                f"USB 3.0 cable and no hub.\n")
+    return out
+
+
 def capture(secs=180, antenna="Antenna A"):
-    sys.path.insert(0, r"Z:\src\hamTuna\tools")
-    import cw
+    # _open_sdr carries the friendly ImportError, so open FIRST and only then
+    # import the constants -- otherwise this line raises the raw traceback.
+    sdr, st = _open_sdr(antenna, FS)
     from SoapySDR import SOAPY_SDR_RX
-    sdr, st = cw._open_sdr(antenna, FS)
     sdr.setFrequency(SOAPY_SDR_RX, 0, 1575.42e6)
     # Power an ACTIVE GPS antenna. These are boolean settings: SoapySDRPlay3
     # reads only the exact string "false" as off and treats everything else --
@@ -45,7 +108,7 @@ def capture(secs=180, antenna="Antenna A"):
             pass
     try:
         time.sleep(0.5)
-        iq = cw._grab(sdr, st, secs, FS, max_stall_s=60)
+        iq = _grab(sdr, st, secs, FS, max_stall_s=60)
     finally:
         # Hand the coax back de-powered even if the grab throws. Otherwise the
         # next thing plugged into this port -- a passive antenna, a filter, a
@@ -74,6 +137,7 @@ def main():
                     help="SDR antenna port (the one with bias-T if your GPS patch is active)")
     a = ap.parse_args()
     path = a.iq or capture(a.secs, a.antenna)
+    require_capture(path)
     dur = Path(path).stat().st_size / 4 / FS
     x = load_seg(path, FS, 0.5, 0.400)
     acq = acquire(x, FS, list(range(1, 33)), np.arange(-7000, 7001, 250.0), 400)

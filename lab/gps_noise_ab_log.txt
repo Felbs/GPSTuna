@@ -1,0 +1,23 @@
+16:25:27 ====================================================================
+16:25:27 GPS A/B: bias-T verified ON vs verified OFF, Antenna B, 2.048 MHz cs16
+16:25:27 baseline to beat (7/27 known-good): {'median_db': 84.5, 'peak_minus_median_db': 18.6, 'spur_bins': 6}
+16:25:27 
+--- bias-T ON  (device reports 'true') ---
+16:28:30   captured 90.0 s (184320000 samples)
+16:28:30   rms 386.1   median -18.0 dB   peak-median 45.8 dB   spur bins 55 (0.67%)
+16:28:30   CLEAN - comparable to the known-good capture
+16:28:33   wrote sky_biast_on.cs16
+16:28:33 
+--- bias-T OFF  (device reports 'false') ---
+16:31:36   captured 90.0 s (184320000 samples)
+16:31:37   rms 106.2   median -18.1 dB   peak-median 29.8 dB   spur bins 10 (0.12%)
+16:31:37   CLEAN - comparable to the known-good capture
+16:31:39   wrote sky_biast_off.cs16
+16:31:40 
+bias-T off, device released, lock released
+16:31:40 
+====================================================================
+16:31:40 ACQUISITION: run locate.py against each capture (offline, no radio):
+16:31:40   python locate.py --iq "Z:\src\GPSTuna\lab_local\sky_biast_on.cs16"
+16:31:40   python locate.py --iq "Z:\src\GPSTuna\lab_local\sky_biast_off.cs16"
+16:31:40 ====================================================================
