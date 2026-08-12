@@ -59,11 +59,17 @@ def _open_sdr(antenna, fs):
     sdr = SoapySDR.Device(devices[0])
     sdr.setSampleRate(SOAPY_SDR_RX, 0, fs)
     if antenna:
+        # Read it BACK. A silently-swallowed setAntenna means capturing on the
+        # wrong port and blaming the sky.
         try:
             sdr.setAntenna(SOAPY_SDR_RX, 0, antenna)
-        except Exception:
-            # Antenna naming is per-driver; a wrong name is not fatal.
-            pass
+        except Exception as e:
+            print(f"[locate] could not select antenna {antenna!r}: {e}")
+        got = sdr.getAntenna(SOAPY_SDR_RX, 0)
+        if got != antenna:
+            ports = list(sdr.listAntennas(SOAPY_SDR_RX, 0))
+            print(f"[locate] WARNING: asked for antenna {antenna!r} but the "
+                  f"radio reports {got!r}. Available: {ports}")
     st = sdr.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32)
     sdr.activateStream(st)
     return sdr, st
@@ -101,11 +107,24 @@ def capture(secs=180, antenna="Antenna A"):
     # Power an ACTIVE GPS antenna. These are boolean settings: SoapySDRPlay3
     # reads only the exact string "false" as off and treats everything else --
     # including "0" -- as ON, so the literals here are load-bearing.
+    powered = False
     for key in ("biasT_ctrl", "biasT", "bias_tee"):
         try:
             sdr.writeSetting(key, "true")
+            # An unverified writeSetting is a HOPE. On this driver only
+            # biasT_ctrl exists; the other two accept the write and read back
+            # empty, which would look like success and quietly leave an active
+            # antenna's LNA unpowered.
+            if str(sdr.readSetting(key)).lower() == "true":
+                powered = True
+                print(f"[locate] bias-T ON via {key} (readback confirmed)")
         except Exception:
             pass
+    if not powered:
+        print("[locate] WARNING: could not confirm bias-T power. An ACTIVE GPS "
+              "patch antenna needs it;\n"
+              "         without it expect to acquire a few birds but fail to "
+              "decode their orbits.")
     try:
         time.sleep(0.5)
         iq = _grab(sdr, st, secs, FS, max_stall_s=60)
