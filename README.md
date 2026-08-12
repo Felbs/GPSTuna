@@ -4,6 +4,8 @@ Point any SDR at 1575.42 MHz, record the raw L1 hiss, and this turns it into
 satellite orbits, a relativity experiment, Galileo's navigation message, and
 your position. No GPS chip; just the antenna, the radio, and the math.
 
+**Project site:** [felbs.software](https://felbs.software) · **Contact:** [E@felbs.software](mailto:E@felbs.software)
+
 **Status: dual-constellation, jointly solved.** From captures on a cheap
 active patch antenna in an attic:
 - **Joint GPS+Galileo position fix: 26.8 m mean rms with 15.4 m
