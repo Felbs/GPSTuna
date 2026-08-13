@@ -533,8 +533,16 @@ def full_fix(path, fs, det, dur, multi=1):
         xsnap = load_seg(path, fs, T_RX, 0.310)
         entries = []
         for prn, (eph, tim) in birds.items():
-            r = acquire(xsnap, fs, [prn],
-                        np.array([tim["tr"]["fd"]]), 300)[prn]
+            # Evaluate the Doppler AT this epoch. tr["fd"] is referenced to
+            # tr["tref"], the centre of the tracking window, and these epochs
+            # walk the whole capture -- on a 600 s file the far one is ~540 s
+            # away, which at ~0.8 Hz/s is hundreds of Hz. This acquire is
+            # handed a SINGLE candidate frequency and does no search, so that
+            # error lands straight on the correlation.
+            _tr = tim["tr"]
+            fd_at = (_tr["fd"]
+                     + _tr.get("fdot", 0.0) * (T_RX - _tr.get("tref", 0.0)))
+            r = acquire(xsnap, fs, [prn], np.array([fd_at]), 300)[prn]
             cp = r.get("code_phase_f", r["code_phase"])     # sub-sample
             phi_ms = (cp % n1) / fs * 1e3                   # 0..1 ms
             aa, bb = fits[prn]

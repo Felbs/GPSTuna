@@ -204,10 +204,24 @@ def track_sv(path, fs, prn, fd0, dur_s):
         while ph[i] - ph[i - 1] < -n1 / 2: ph[i] += n1
     t = np.array(times)
     slope, icpt = np.polyfit(t, ph, 1)
-    fd = float(np.median(fds))
+    # LINEAR Doppler model, not a median. Satellites drift up to ~0.8 Hz/s, so
+    # one fixed fd leaves +-45 Hz of residual chirp across a 118 s stream --
+    # fatal for the squared-prompt phase reference, and the failure is not
+    # graceful: parity collapses to ~1% while acquisition still reports a
+    # healthy satellite, so it reads as bad reception. Which satellites die
+    # depends on their Doppler RATE, not their strength, which is why a strong
+    # bird can fail while a weak one decodes.
+    #
+    # joint_fix.py has carried this model for a while; track_sv kept the median
+    # and nobody noticed the two had diverged. prompt_stream already wipes the
+    # chirp when fd/fdot/tref are present -- it just never received them here.
+    fdot, f0 = np.polyfit(t, np.array(fds), 1)
+    tref = float(np.mean(t))
+    fd = float(fdot * tref + f0)
     spc = fs / CODE_RATE
     lam = np.mean(pofs) - 1.0
     return dict(prn=prn, times=t, phases=ph, fd=fd, fd_std=float(np.std(fds)),
+                fdot=float(fdot), tref=tref,
                 slope=float(slope), icpt=float(icpt),
                 pred_slope=float(-fd / 1540.0 * spc),
                 resid_rms=float(np.std(ph - (slope * t + icpt))),
@@ -221,13 +235,20 @@ def bit_tent(path, fs, tr, t_start=5.0, dur_s=10.0):
     """50 bps bit-edge search: energy of 20-prompt coherent sums vs alignment."""
     n1 = int(round(fs * 1e-3))
     ps = []
+    # tr["fd"] is the Doppler AT tr["tref"] (the tracking window's centre), not
+    # a constant for the whole capture. This search runs near the START of the
+    # file, so evaluate the model here instead of importing ~40 Hz of error
+    # from the other end of the window.
+    fdot = tr.get("fdot", 0.0)
+    tref = tr.get("tref", 0.0)
     for chunk in range(int(dur_s * 10)):
         t0 = t_start + chunk * 0.1
         x = load_seg(path, fs, t0, 0.1)
         ci = int(round(tr["slope"] * t0 + tr["icpt"])) % n1
         code = np.roll(sampled_code(tr["prn"], fs, n1), ci)
         t = np.arange(len(x)) / fs
-        xw = x * np.exp(-2j * np.pi * tr["fd"] * t)
+        fd_here = tr["fd"] + fdot * (t0 - tref)
+        xw = x * np.exp(-2j * np.pi * fd_here * t)
         ps.append((xw.reshape(100, n1) * code[None, :]).sum(axis=1))
     p = np.concatenate(ps)
     nb = len(p) // 20 - 1
