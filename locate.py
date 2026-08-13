@@ -96,36 +96,90 @@ def _grab_to_file(sdr, st, secs, fs, path, max_stall_s=60):
     -- and the file was going to be written anyway, at half the size, because
     int16 is 4 bytes per sample.
     """
+    import queue
+    import threading
+    try:
+        from SoapySDR import SOAPY_SDR_OVERFLOW
+    except Exception:                                            # noqa: BLE001
+        SOAPY_SDR_OVERFLOW = -4
+
     want = int(secs * fs)
     chunk = np.empty(65536, np.complex64)
-    inter = np.empty(2 * len(chunk), np.int16)
-    got = 0
+
+    # The conversion and the write happen on a SEPARATE thread. Doing them in
+    # the read loop -- which the first version did -- means the radio is not
+    # being serviced while the SD card is written, its ring buffer overruns,
+    # and samples are lost. Acquisition survives that (correlating 1023 chips
+    # buys 30 dB and does not care about a hole); the 50 bps navigation decode
+    # does not, so the symptom is "plenty of satellites, no ephemeris" rather
+    # than an obvious failure. On a Pi it cost every fix we tried.
+    q: queue.Queue = queue.Queue(maxsize=64)
+    err = []
+
+    def _writer():
+        try:
+            with open(path, "wb") as fh:
+                while True:
+                    buf = q.get()
+                    if buf is None:
+                        return
+                    inter = np.empty(2 * len(buf), np.int16)
+                    inter[0::2] = np.clip(buf.real * 32767, -32768,
+                                          32767).astype(np.int16)
+                    inter[1::2] = np.clip(buf.imag * 32767, -32768,
+                                          32767).astype(np.int16)
+                    inter.tofile(fh)
+        except Exception as e:                                   # noqa: BLE001
+            err.append(e)
+
+    th = threading.Thread(target=_writer, daemon=True)
+    th.start()
+
+    got = overflows = 0
     last_progress = time.time()
     next_note = 60.0
     t0 = time.time()
-    with open(path, "wb") as fh:
+    try:
         while got < want:
             sr = sdr.readStream(st, [chunk], len(chunk), timeoutUs=1000000)
             n = getattr(sr, "ret", sr if isinstance(sr, int) else -1)
             if n > 0:
                 n = min(n, want - got)
-                inter[0:2 * n:2] = np.clip(chunk[:n].real * 32767,
-                                           -32768, 32767).astype(np.int16)
-                inter[1:2 * n:2] = np.clip(chunk[:n].imag * 32767,
-                                           -32768, 32767).astype(np.int16)
-                inter[:2 * n].tofile(fh)
+                q.put(chunk[:n].copy())      # copy: the buffer is reused
                 got += n
                 last_progress = time.time()
                 el = time.time() - t0
                 if el >= next_note:
                     print(f"[locate] captured {got/fs:6.0f} s of {secs:.0f} s "
-                          f"({got*4/1e9:.2f} GB)", flush=True)
+                          f"({got*4/1e9:.2f} GB){'' if not overflows else f'  OVERFLOWS {overflows}'}",
+                          flush=True)
                     next_note += 60.0
+            elif n == SOAPY_SDR_OVERFLOW:
+                # COUNT it. Swallowing this silently is how a capture full of
+                # holes reaches the decoder looking like a clean one.
+                overflows += 1
+                last_progress = time.time()
             elif time.time() - last_progress > max_stall_s:
                 raise SystemExit(
                     f"\nThe radio stopped delivering samples after "
                     f"{got/fs:.1f} s ({got}/{want}).\nThis is usually USB: try "
                     f"a short, direct USB 3.0 cable and no hub.\n")
+            if err:
+                raise SystemExit(f"\nWriting the capture failed: {err[0]}\n")
+    finally:
+        q.put(None)
+        th.join(timeout=30)
+    if err:
+        raise SystemExit(f"\nWriting the capture failed: {err[0]}\n")
+    if overflows:
+        print(f"[locate] WARNING: {overflows} SDR overflow(s) during the "
+              f"capture.\n"
+              f"         Samples were dropped. Acquisition will still find "
+              f"satellites, but the\n"
+              f"         navigation decode may fail to complete any orbit -- "
+              f"which looks like a\n"
+              f"         weak-sky problem and is not one. Use faster storage, "
+              f"or a shorter capture.", flush=True)
     return got
 
 
