@@ -59,12 +59,32 @@ def _open_sdr(antenna, fs):
             "See the README (\"Getting a capture\") for the recording "
             "settings.\n")
 
+    # SoapySDR logs an ERROR for every driver module whose library is absent --
+    # airspy, bladeRF, HackRF, Pluto, rtlsdr, uhd. None of them are ours and
+    # none of them matter, but a first run prints ten red ERROR lines before
+    # anything works, which reads exactly like a failure.
+    try:
+        SoapySDR.SoapySDR_setLogLevel(SoapySDR.SOAPY_SDR_FATAL)
+    except Exception:                                            # noqa: BLE001
+        pass
+
     devices = SoapySDR.Device.enumerate()
     if not devices:
+        hint = ""
+        if sys.platform.startswith("win"):
+            # Measured 8/13: the RSPdx was plugged in and healthy and
+            # enumerate() still returned nothing, because the SDRplay API
+            # SERVICE had stopped. "No radio" sends the reader to the cable;
+            # the cable was fine. Name the usual cause instead.
+            hint = ("\nOn Windows the SDRplay API runs as a SERVICE, which can "
+                    "be stopped\neven while the radio is plugged in and "
+                    "healthy. Check it with:\n"
+                    "        Start-Service SDRplayAPIService\n"
+                    "and try again.\n")
         raise SystemExit(
             "\nSoapySDR is installed but found no radio.\n"
             "Check that the device is plugged in and not held open by another "
-            "program.\n")
+            "program.\n" + hint)
     sdr = SoapySDR.Device(devices[0])
     sdr.setSampleRate(SOAPY_SDR_RX, 0, fs)
     if antenna:
