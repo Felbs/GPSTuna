@@ -173,6 +173,22 @@ Any SDR tool that writes interleaved int16 will do. If you have SoapySDR
 installed, `python locate.py` does the whole thing — capture, acquire, fix —
 in one command.
 
+**Already have a capture?** The readers are extension-agnostic — a SigMF
+`ci16_le` recording (`*.sigmf-data`) from a USRP, a `.cs16` from an RSP, or
+anything else that is raw interleaved int16 at 2.048 Msps works as-is:
+```bash
+python locate.py --iq gps_1575.420MHz_2.048Msps_ci16_le.sigmf-data
+```
+Nothing else in the sidecar is read; the rate is assumed to be 2.048 Msps
+(`fix.py --fs` overrides it). Verified 8/15 on a B210 + rubidium recording
+made in Europe — 7 satellites, 100 % word parity, a fix in the right city.
+
+> **If you cloned before 2026-08-12 and got a confident, wrong position**
+> (kilometres of residual, an altitude below sea level, still printed as
+> `SOLVED`): that was a tracking bug that discarded the Doppler *rate*, and
+> it hit high-drift satellites regardless of signal strength. `git pull`.
+> The solver now also refuses to call a non-solution a fix.
+
 > An indoor capture through a window usually acquires nothing. GPS arrives
 > below the noise floor; the antenna is the whole game.
 

@@ -278,9 +278,16 @@ def main():
     # code phases -> SV-time pseudorange assembly -> least-squares solve.
     # The fix is written ONLY to lab_local/fix_result.json (gitignored).
     rc = full_fix(path, FS, strong, dur, multi=5)
-    if rc:
+    if rc == 1:
         print("[locate] not enough complete orbits - a longer capture (300 s)")
         print("         usually gets the remaining subframes; retry.")
+    elif rc:
+        print("[locate] the solver did not find a position (see the reasons "
+              "above). This is a")
+        print("         software problem, not your antenna or radio: the sky "
+              "view and the")
+        print("         orbits decoded. Please open an issue with the "
+              "[rel]/[fix] lines above.")
 
 
 if __name__ == "__main__":

@@ -69,6 +69,14 @@ def decode_eph(path, fs, prn, dopp, dur, want_timing=False):
                 tow = ubits(words[1], 1, 17)
                 harvest.append((sf, tow, words))
                 sf_anchors.append((int(i), int(sf), int(tow)))
+    # how many INDEPENDENT parity-clean subframe-2 copies carry each toe --
+    # counted before the vote below adds its own (possibly bit-flipped) copy,
+    # so the consumer can tell a broadcast off-grid toe from a voted-in one.
+    toe_clean = {}
+    for sf, _tow, W in harvest:
+        if sf == 2 and 9 in W:
+            t = ubits(W[9], 1, 16) * 16
+            toe_clean[t] = toe_clean.get(t, 0) + 1
     # majority vote across repeats
     anchors = {}
     for k, i in enumerate(starts):
@@ -103,7 +111,8 @@ def decode_eph(path, fs, prn, dopp, dur, want_timing=False):
     eph = parse_harvest(harvest)
     eph["prn"] = prn
     if want_timing:
-        return eph, {"tent": tent, "anchors": sf_anchors, "tr": tr}
+        return eph, {"tent": tent, "anchors": sf_anchors, "tr": tr,
+                     "toe_clean": toe_clean.get(eph.get("toe"), 0)}
     return eph
 
 
@@ -397,12 +406,13 @@ def resolve_from_cache():
     res = solve_final(entries)
     rms, lat, lon, h, offs = (res["rms"], res["lat"], res["lon"], res["h"],
                               res["offsets"])
+    sane = -500 < h < 5000 and rms < 1000.0
     (HERE / "lab_local" / "fix_result.json").write_text(_json.dumps({
+        "valid": sane,
         "lat": lat, "lon": lon, "alt_m": h,
         "birds": [e["prn"] for e in entries],
         "resid_rms_m": rms, "ms_offsets": offs,
         "iono_corrected": res["iono"], "el_deg": res["el_deg"]}, indent=1))
-    sane = -500 < h < 5000
     print(f"[resolve] residual rms {rms:,.1f} m "
           f"(uncorrected {res['raw_rms']:,.1f} m), altitude "
           f"{'PLAUSIBLE' if sane else 'IMPLAUSIBLE'} ({h:,.0f} m), "
@@ -475,14 +485,24 @@ def full_fix(path, fs, det, dur, multi=1):
     # siblings agree is almost always a voted-in bit error (one LSB of
     # toe = 16 s = ~60 km of satellite position - it poisons the whole
     # solve). Post-upload cutover sets CAN be legitimately off-grid, so
-    # this only fires when the bird is BOTH off-grid and alone in it.
+    # this only fires when the bird is BOTH off-grid and alone in it --
+    # AND no two independent parity-clean copies of its subframe 2 agree
+    # on that toe. Two clean copies agreeing is a broadcast, not a flip
+    # (8/15: a user's strongest bird, 190/190 parity, toe = grid - 16 s,
+    # was being thrown away by this gate for no reason).
     on_grid = [p for p, (e, _t) in birds.items() if e["toe"] % 7200 == 0]
     if len(on_grid) >= 3:
         for prn in [p for p in list(birds) if p not in on_grid]:
             toe_bad = birds[prn][0]["toe"]
+            n_clean = birds[prn][1].get("toe_clean", 0)
+            if n_clean >= 2:
+                print(f"  PRN{prn}: toe {toe_bad:.0f} off the 2-hour grid "
+                      f"but {n_clean} independent clean copies agree - "
+                      f"KEPT (post-upload cutover ephemeris)")
+                continue
             print(f"  PRN{prn}: toe {toe_bad:.0f} off the 2-hour grid while "
                   f"{len(on_grid)} siblings are on it - DROPPED "
-                  f"(suspected voted-in bit error)")
+                  f"(suspected voted-in bit error, {n_clean} clean copies)")
             del birds[prn]
     if len(birds) < 4:
         print(f"[fix] only {len(birds)} birds fully decoded - need 4")
@@ -568,12 +588,33 @@ def full_fix(path, fs, det, dur, multi=1):
     (HERE / "lab_local").mkdir(exist_ok=True)
     (HERE / "lab_local" / "prs_cache.json").write_text(_json2.dumps(cache))
     # 4. average the sane epochs in ECEF; scatter = honest repeatability
-    good = [r for r in results if -500 < r["h"] < 5000] or results
+    good = [r for r in results if -500 < r["h"] < 5000]
+    if not good:
+        # nothing sane to average: fall back to everything ONLY so the
+        # numbers below describe what happened -- never as a position.
+        good = results
     P = np.array([r["x"][:3] for r in good])
     scatter = float(np.linalg.norm(P.std(axis=0))) if len(good) > 1 else 0.0
     lat, lon, h = ecef_to_llh(P.mean(axis=0))
     rms = float(np.mean([r["rms"] for r in good]))
+    # 5. is this a FIX or a number? A real single-frequency solve sits at
+    # tens of metres rms with epochs that agree to ~100 m. A wrong-integer
+    # solve (the ms-ambiguity search landing on a garbage minimum) shows up
+    # as km of residual, km of scatter, or an altitude in the mantle -- and
+    # used to be printed as SOLVED with coordinates, which put a user in
+    # Hungary from a capture made in the Netherlands (8/15). Every gate
+    # below is loose enough that a rooftop with a bad sky still passes;
+    # only a non-solution fails them all at once.
+    reasons = []
+    if not (-500 < h < 5000):
+        reasons.append(f"altitude {h:,.0f} m is not on this planet's surface")
+    if rms > 1000.0:
+        reasons.append(f"residual rms {rms:,.0f} m (a real fix is tens of m)")
+    if scatter > 5000.0:
+        reasons.append(f"epoch scatter {scatter:,.0f} m (epochs disagree by km)")
+    valid = not reasons
     (HERE / "lab_local" / "fix_result.json").write_text(_json.dumps({
+        "valid": valid,
         "lat": lat, "lon": lon, "alt_m": h,
         "birds": sorted(int(p) for p in birds),
         "resid_rms_m": rms, "epochs_used": len(good),
@@ -581,13 +622,20 @@ def full_fix(path, fs, det, dur, multi=1):
         "el_deg": good[0]["el_deg"],
         "ms_offsets": good[0]["offsets"],
         "capture": str(path)}, indent=1))
-    sane = -500 < h < 5000
-    print(f"[fix] SOLVED with {len(birds)} birds x {len(good)} epoch(s): "
-          f"mean rms {rms:,.1f} m, epoch scatter {scatter:,.1f} m, "
-          f"altitude {'PLAUSIBLE' if sane else 'IMPLAUSIBLE'} ({h:,.0f} m)")
-    print(f"[fix] coordinates written to lab_local/fix_result.json "
-          f"(gitignored - yours alone)")
-    return 0
+    if valid:
+        print(f"[fix] SOLVED with {len(birds)} birds x {len(good)} epoch(s): "
+              f"mean rms {rms:,.1f} m, epoch scatter {scatter:,.1f} m, "
+              f"altitude PLAUSIBLE ({h:,.0f} m)")
+        print(f"[fix] coordinates written to lab_local/fix_result.json "
+              f"(gitignored - yours alone)")
+        return 0
+    print(f"[fix] NO FIX from {len(birds)} birds x {len(good)} epoch(s) -- "
+          f"the solve converged, but not on a position:")
+    for r in reasons:
+        print(f"       - {r}")
+    print("[fix] lab_local/fix_result.json holds the numbers with valid=false; "
+          "do NOT read a location from it.")
+    return 2
 
 
 if __name__ == "__main__":
