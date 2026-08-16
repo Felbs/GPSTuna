@@ -892,6 +892,16 @@ def full_fix(path, fs, det, dur, multi=1):
         print(f"[fix] SOLVED with {len(birds)} birds x {len(good)} epoch(s): "
               f"mean rms {rms:,.1f} m, epoch scatter {scatter:,.1f} m, "
               f"altitude PLAUSIBLE ({h:,.0f} m)")
+        dof = len(birds) - 4
+        if dof <= 1:
+            # 8/15 live: 5 birds printed "rms 2.8 m" beside a 41 m scatter.
+            # With one degree of freedom the residual is small by
+            # construction, not by accuracy; say which number to believe.
+            print(f"[fix] note: with {len(birds)} satellites the solve has "
+                  f"{dof} degree{'s' if dof != 1 else ''} of freedom, so the "
+                  f"residual rms is NOT an accuracy figure -- the epoch "
+                  f"scatter ({scatter:,.0f} m) is. More sky = more birds = "
+                  f"an honest rms.")
         print(f"[fix] coordinates written to lab_local/fix_result.json "
               f"(gitignored - yours alone)")
         return 0
