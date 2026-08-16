@@ -21,10 +21,6 @@ sys.path.insert(0, str(HERE))
 from measure import acquire, load_seg, track_sv, require_capture
 from relativity import clean_carrier, prompt_stream
 
-CAPS = [
-    ("../captures/gps_l1_navbits.cs16", [15]),
-    ("../captures/gps_fix_20260725.cs16", [5, 21]),
-]
 FS = 2.048e6
 
 
@@ -43,12 +39,26 @@ def indices(p, win_s=60.0):
 
 
 def main():
+    import argparse
+    ap = argparse.ArgumentParser(description="S4 + phase scintillation "
+                                 "indices from a raw L1 capture")
+    ap.add_argument("--iq", required=True, action="append",
+                    help="capture (repeatable)")
+    ap.add_argument("--prns", default="",
+                    help="comma-separated PRNs to track (default: every "
+                         "bird acquired with metric > 2.5)")
+    a = ap.parse_args()
+    want = [int(v) for v in a.prns.split(",") if v.strip()]
     results = {}
-    for cap, prns in CAPS:
-        path = HERE / cap
-        if not path.exists():
-            continue
+    for cap in a.iq:
+        path = Path(cap)
         require_capture(str(path))
+        prns = want
+        if not prns:
+            x0 = load_seg(str(path), FS, 0.5, 0.310)
+            acq0 = acquire(x0, FS, list(range(1, 33)),
+                           np.arange(-7000, 7001, 250.0), 300)
+            prns = sorted(p for p, r in acq0.items() if r["metric"] > 2.5)
         dur = path.stat().st_size / 4 / FS
         x = load_seg(str(path), FS, 0.5, 0.310)
         for prn in prns:

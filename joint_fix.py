@@ -38,6 +38,7 @@ tool prints residuals, altitudes, bird counts and time offsets - never
 latitude/longitude.
 """
 import argparse
+import os
 import itertools
 import json
 import sys
@@ -63,7 +64,9 @@ import gal_eph
 from gal_eph import (anchors_from_pages, assemble_eph, extract_ggto,
                      fold_bgd, ggto_eval)
 
-PATH = r"Z:/src/grid-atlas/captures/gps_attic_long.cs16"
+# The ONE capture every stage reads. Set with --iq (or GPSTUNA_IQ); it used
+# to be the author's path hard-coded here, which no other machine has.
+PATH = os.environ.get("GPSTUNA_IQ", "")
 FS = 4.096e6                     # ONE file, ONE fs for both constellations:
                                  # cross-file window rounding would pollute
                                  # the inter-system bias by up to 244 ns
@@ -733,6 +736,9 @@ def stage_solve(snap_name="joint_snap.json", out_name="fix_result_joint.json"):
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--iq", default=None,
+                    help="the capture every stage reads (4.096 Msps for the "
+                         "joint GPS+Galileo chain); or set GPSTUNA_IQ")
     ap.add_argument("--stage", required=True,
                     choices=["gal", "gps", "snap", "solve"])
     ap.add_argument("--prn", type=int, default=None)
@@ -743,6 +749,11 @@ def main():
     ap.add_argument("--out", default="fix_result_joint.json",
                     help="solve only: result file name in lab_local/")
     a = ap.parse_args()
+    global PATH
+    if a.iq:
+        PATH = a.iq
+    if a.stage != "solve" and not PATH:
+        ap.error("--iq CAPTURE is required for this stage (or set GPSTUNA_IQ)")
     if a.stage == "gal":
         return stage_gal(a.prn)
     if a.stage == "gps":

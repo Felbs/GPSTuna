@@ -5,7 +5,7 @@ are visible) compute your position - written ONLY to lab_local/ (gitignored).
 Run this with the antenna at a window or outdoors, or on a GPS patch antenna.
 Indoors you'll see 1-3 weak satellites (not enough); with sky view, 6-12.
 
-  python locate.py            # 180 s capture on Antenna A, then locate
+  python locate.py            # 180 s capture on Antenna B, then locate (--secs 300 for a sure first fix)
   python locate.py --iq f.cs16   # locate from an existing capture
 
 A 3D fix needs >= 4 satellites strong enough to decode their orbit (metric > 3.5,
@@ -14,6 +14,7 @@ view is good; if it is, the full pseudorange solve runs and the result stays
 private in lab_local/fix_result.json.
 """
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
@@ -263,8 +264,9 @@ def main():
     dur = Path(path).stat().st_size / 4 / FS
     x = load_seg(path, FS, 0.5, 0.400)
     acq = acquire(x, FS, list(range(1, 33)), np.arange(-7000, 7001, 250.0), 400)
-    strong = {p: r for p, r in acq.items() if r["metric"] > 3.5}
-    weak = {p: r for p, r in acq.items() if 2.0 < r["metric"] <= 3.5}
+    thr = float(os.environ.get("GPSTUNA_MIN_METRIC", "3.5"))
+    strong = {p: r for p, r in acq.items() if r["metric"] > thr}
+    weak = {p: r for p, r in acq.items() if 2.0 < r["metric"] <= thr}
     print(f"SKY VIEW: {len(strong)} strong + {len(weak)} weak satellites")
     for p, r in sorted(strong.items(), key=lambda kv: -kv[1]["metric"]):
         print(f"  PRN{p:2d}  metric {r['metric']:.1f}  STRONG")
@@ -277,7 +279,7 @@ def main():
     # full pipeline: nav decode with timing anchors -> common-epoch snapshot
     # code phases -> SV-time pseudorange assembly -> least-squares solve.
     # The fix is written ONLY to lab_local/fix_result.json (gitignored).
-    rc = full_fix(path, FS, strong, dur, multi=5)
+    rc = full_fix(path, FS, strong, dur, multi=int(os.environ.get('GPSTUNA_EPOCHS', '15')))
     if rc == 1:
         print("[locate] not enough complete orbits - a longer capture (300 s)")
         print("         usually gets the remaining subframes; retry.")

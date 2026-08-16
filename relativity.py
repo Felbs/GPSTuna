@@ -15,7 +15,7 @@ Pipeline (built on measure.py's acquisition/tracking):
          clock offset -4.4647e-10
        - the "GPS drifts ~11 km/day without Einstein" number
 
-  python relativity.py --iq ../captures/gps_l1_navbits.cs16
+  python relativity.py --iq your_capture.cs16
 """
 import argparse
 import sys
@@ -56,16 +56,59 @@ def prompt_stream(path, fs, tr, t_start, dur_s):
     n1 = int(round(fs * 1e-3))
     fdot = tr.get("fdot", 0.0)
     tref = tr.get("tref", 0.0)
+    fd = tr["fd"]
+    base = sampled_code(tr["prn"], fs, n1)
+    # The code phase is re-rolled every 0.1 s (it slips ~6 samples/s at
+    # 5 kHz of Doppler, so a longer roll grid would decorrelate) -- that grid
+    # is unchanged. What changed (8/15 profile: this function was 199 of
+    # 390 s): the file is read 1 s at a time instead of 0.1 s, and the
+    # carrier wipe runs in complex64. The PHASE is still built in float64
+    # (fd*t reaches 1.5e6 cycles at 300 s; float32 would be 0.1 cycle off)
+    # and folded mod 1 BEFORE the cast, so the cast costs 4e-7 rad. Prompt
+    # sums accumulate in complex128 as before.
+    n_sub = int(round(dur_s * 10))          # 0.1 s sub-chunks, as before
+    n_blk = n1 * 100                        # samples per 0.1 s
     out = []
-    for chunk in range(int(dur_s * 10)):
-        t0 = t_start + chunk * 0.1
-        x = load_seg(path, fs, t0, 0.1)
-        ci = int(round(tr["slope"] * t0 + tr["icpt"])) % n1
-        code = np.roll(sampled_code(tr["prn"], fs, n1), ci)
-        t_abs = t0 + np.arange(len(x)) / fs
-        xw = x * np.exp(-2j * np.pi * (tr["fd"] * t_abs
-                                       + 0.5 * fdot * (t_abs - tref) ** 2))
-        out.append((xw.reshape(100, n1) * code[None, :]).sum(axis=1))
+    sub = 0
+    while sub < n_sub:
+        take = min(10, n_sub - sub)         # up to 1 s per read
+        t0 = t_start + sub * 0.1
+        x = load_seg(path, fs, t0, 0.1 * take)
+        n = len(x)
+        # DC removal per 0.1 s sub-chunk, exactly as the 0.1 s reads did
+        # (load_seg demeaned each read; a 1 s read would move the DC
+        # estimate and change the prompts by ~0.07 % -- keep it identical)
+        full = (n // n_blk) * n_blk
+        if full:
+            v = x[:full].reshape(-1, n_blk)
+            v -= v.mean(axis=1, keepdims=True)
+        # phase = fd*t + 0.5*fdot*(t-tref)^2  ==  t*(a*t + b) + c: three
+        # float64 ops (c INCLUDED -- a constant phase is a constant rotation
+        # of every prompt, not something mod 1 removes), then fold, then
+        # cast. cos/sin on float32 is 3.5x faster than numpy's complex exp
+        # for the same result (measured 29 vs 104 ms per second of data).
+        t_abs = t0 + np.arange(n) / fs
+        a = 0.5 * fdot
+        b = fd - fdot * tref
+        c = 0.5 * fdot * tref * tref
+        ph = t_abs * (a * t_abs + b)
+        ph += c
+        np.mod(ph, 1.0, out=ph)
+        ph32 = ph.astype(np.float32)
+        ph32 *= np.float32(2 * np.pi)
+        w = np.empty(n, dtype=np.complex64)
+        w.real = np.cos(ph32)
+        w.imag = -np.sin(ph32)
+        xw = x.astype(np.complex64, copy=False) * w
+        for k in range(take):
+            blk = xw[k * n_blk:(k + 1) * n_blk]
+            if len(blk) < n_blk:
+                break
+            ci = int(round(tr["slope"] * (t0 + k * 0.1) + tr["icpt"])) % n1
+            code = np.roll(base, ci).astype(np.complex64)
+            # the prompt sum as a matmul: 5x the reshape*code.sum() form
+            out.append((blk.reshape(100, n1) @ code).astype(np.complex128))
+        sub += take
     return np.concatenate(out)
 
 
@@ -390,7 +433,8 @@ def wobble_plot(eph, prn, out_png):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--iq", default=str(HERE.parent / "captures" / "gps_l1_navbits.cs16"))
+    ap.add_argument("--iq", required=True,
+                    help="raw L1 IQ capture (2.048 Msps interleaved int16)")
     ap.add_argument("--fs", type=float, default=2.048e6)
     a = ap.parse_args()
     fs = a.fs

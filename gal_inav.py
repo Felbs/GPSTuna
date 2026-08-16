@@ -27,7 +27,7 @@ closes the loop from raw IQ to CRC-verified navigation pages:
      cross-checked against position in the capture across satellites.
 
 Usage:
-  python gal_inav.py --iq Z:/src/grid-atlas/captures/gps_attic_long.cs16
+  python gal_inav.py --iq your_capture.cs16 --fs 4096000
         [--fs 4096000] [--prns 29,27,14] [--t0 1.0] [--dur 777]
         [--selftest]   # synthesize a full E1 signal end-to-end and
                        # require CRC-clean pages back out of it
@@ -529,14 +529,17 @@ def selftest(fs):
 # --------------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--iq",
-                    default="Z:/src/grid-atlas/captures/gps_attic_long.cs16")
+    ap.add_argument("--iq", default=None,
+                    help="raw L1 IQ capture, interleaved int16 (required "
+                         "unless --selftest)")
     ap.add_argument("--fs", type=float, default=4.096e6)
     ap.add_argument("--prns", default="29,27,14")
     ap.add_argument("--t0", type=float, default=1.0)
     ap.add_argument("--dur", type=float, default=777.0)
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
+    if not a.selftest and not a.iq:
+        ap.error("--iq CAPTURE is required (or --selftest)")
     if a.selftest:
         return selftest(a.fs)
 

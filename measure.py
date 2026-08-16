@@ -64,8 +64,20 @@ G2_TAPS = {
 PUBLISHED_OCTAL = {1: "1440", 2: "1620", 3: "1710", 4: "1744", 5: "1133"}
 
 
+_CA_CACHE = {}
+_SAMPLED_CACHE = {}
+
+
 def ca_code(prn):
-    """1023-chip C/A code, +1/-1 floats. G1: x^10+x^3+1; G2: x^10+x^9+x^8+x^6+x^3+x^2+1."""
+    """1023-chip C/A code, +1/-1 floats. G1: x^10+x^3+1; G2: x^10+x^9+x^8+x^6+x^3+x^2+1.
+
+    Cached: the LFSR is bit-exact and pure, and before the cache it was being
+    re-run 10,693 times in one fix (once per 0.1 s prompt chunk) -- 57 s of a
+    390 s run spent regenerating the same 1023 chips. Returns a READ-ONLY
+    array so a caller cannot corrupt the shared copy."""
+    c = _CA_CACHE.get(prn)
+    if c is not None:
+        return c
     s1, s2 = G2_TAPS[prn]
     g1 = np.ones(10, dtype=int)
     g2 = np.ones(10, dtype=int)
@@ -76,7 +88,10 @@ def ca_code(prn):
         fb2 = g2[1] ^ g2[2] ^ g2[5] ^ g2[7] ^ g2[8] ^ g2[9]
         g1 = np.concatenate(([fb1], g1[:9]))
         g2 = np.concatenate(([fb2], g2[:9]))
-    return 1.0 - 2.0 * out
+    c = 1.0 - 2.0 * out
+    c.setflags(write=False)
+    _CA_CACHE[prn] = c
+    return c
 
 
 def generator_selfcheck():
@@ -92,29 +107,121 @@ def generator_selfcheck():
 
 
 def sampled_code(prn, fs, n_samp):
-    idx = (np.arange(n_samp) * CODE_RATE / fs).astype(np.int64) % 1023
-    return ca_code(prn)[idx]
+    """The C/A code sampled at fs over n_samp samples. Cached per
+    (prn, fs, n_samp) and read-only, for the same reason as ca_code."""
+    key = (prn, float(fs), int(n_samp))
+    c = _SAMPLED_CACHE.get(key)
+    if c is None:
+        idx = (np.arange(n_samp) * CODE_RATE / fs).astype(np.int64) % 1023
+        c = ca_code(prn)[idx]
+        c.setflags(write=False)
+        _SAMPLED_CACHE[key] = c
+    return c
 
 
 # ------------------------------------------------------------- acquisition
+def _acquire_rows(blocks, fs, prns, fd):
+    """One Doppler: noncoherent power vs code phase for every PRN, in prns
+    order. The unit of work for both the serial and the parallel path."""
+    n1 = blocks.shape[1]
+    t = np.arange(n1) / fs
+    BF = np.fft.fft(blocks * np.exp(-2j * np.pi * fd * t)[None, :], axis=1)
+    rows = []
+    for p in prns:
+        code_f = np.conj(np.fft.fft(sampled_code(p, fs, n1)))
+        corr = np.fft.ifft(BF * code_f[None, :], axis=1)
+        rows.append((np.abs(corr) ** 2).sum(axis=0))
+    return rows
+
+
+_ACQ = {}                                   # worker-side: the shared blocks
+
+
+def _acq_init(blocks, fs, prns):
+    _ACQ["blocks"], _ACQ["fs"], _ACQ["prns"] = blocks, fs, prns
+
+
+def _acq_task(fd):
+    return _acquire_rows(_ACQ["blocks"], _ACQ["fs"], _ACQ["prns"], fd)
+
+
+def _pool_allowed():
+    """Only the main process may open a pool (no nesting), only when it
+    would help, and only when the spawned children can re-import __main__:
+    under `python -`, `python -c` or a REPL there is no main FILE, the
+    children die at bootstrap and Pool.map would wait forever (found 8/15,
+    the hard way). GPSTUNA_SERIAL=1 forces the serial path everywhere."""
+    import multiprocessing as _mp
+    import os as _os
+    import sys as _sys
+    main = _sys.modules.get("__main__")
+    main_file = getattr(main, "__file__", None)
+    return (_mp.current_process().name == "MainProcess"
+            and (_os.cpu_count() or 1) > 1
+            and _os.environ.get("GPSTUNA_SERIAL", "0") != "1"
+            and bool(main_file) and _os.path.isfile(str(main_file)))
+
+
+def pool_timeout(serial_estimate_s):
+    """A pool that has not answered in ~10x the serial estimate (min 5 min)
+    is not slow, it is dead -- respawning workers that die at import look
+    exactly like a long job. Callers fall back to serial on expiry."""
+    return max(300.0, 10.0 * float(serial_estimate_s))
+
+
+def _acquire_rows_parallel(blocks, fs, prns, dopplers):
+    """Doppler-parallel _acquire_rows. Returns rows in dopplers order, or
+    None if a pool cannot be started (caller falls back to serial)."""
+    import multiprocessing as _mp
+    import os as _os
+    # measured 8/15 on a 64-core box: 6 workers 9.3 s, 10 -> 8.1 s, 16 -> 8.9,
+    # 24 -> 10.1 (serial 27 s). Past ~10 the interpreter start-ups and memory
+    # bandwidth eat the gain; a 4-core Pi is capped by its cores anyway.
+    n_workers = min(len(dopplers), max(1, _os.cpu_count() or 1), 10)
+    if n_workers < 2:
+        return None
+    for _v in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS",
+               "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        _os.environ.setdefault(_v, "1")
+    try:
+        ctx = _mp.get_context("spawn")
+        with ctx.Pool(n_workers, initializer=_acq_init,
+                      initargs=(np.ascontiguousarray(blocks), fs, prns)) as pool:
+            # serial cost ~ 0.5 ms per (PRN, Doppler, block) on a slow core
+            est = 0.5e-3 * len(prns) * len(dopplers) * blocks.shape[0]
+            res = pool.map_async(_acq_task, list(dopplers),
+                                 chunksize=max(1, len(dopplers) // (3 * n_workers)))
+            return res.get(timeout=pool_timeout(est))
+    except Exception as e:                                   # noqa: BLE001
+        print(f"  (acquisition pool unavailable: {type(e).__name__}: {e}; "
+              f"searching serially)")
+        return None
+
+
 def acquire(x, fs, prns, dopplers, n_noncoh):
     """Parallel code-phase search. 1 ms coherent x n_noncoh noncoherent.
     Returns {prn: dict(metric, dopp, code_phase, peak_over_floor)} where
     metric = peak / second peak (2nd peak excludes +-1 chip at all Dopplers)."""
     n1 = int(round(fs * 1e-3))
     blocks = x[: n1 * n_noncoh].reshape(n_noncoh, n1)
-    t = np.arange(n1) / fs
-    code_f = {p: np.conj(np.fft.fft(sampled_code(p, fs, n1))) for p in prns}
     excl = int(round(fs / CODE_RATE))
-    maps = {p: [] for p in prns}
-    for fd in dopplers:
-        BF = np.fft.fft(blocks * np.exp(-2j * np.pi * fd * t)[None, :], axis=1)
-        for p in prns:
-            corr = np.fft.ifft(BF * code_f[p][None, :], axis=1)
-            maps[p].append((np.abs(corr) ** 2).sum(axis=0))
+    prns = list(prns)
+    dopplers = np.asarray(dopplers, dtype=float)
+    # The sky-view search (32 PRNs x 57 Dopplers x 400 ms) is 30 s on one
+    # core and embarrassingly parallel over Dopplers: each worker FFTs its
+    # Doppler's blocks once and correlates every PRN -- no duplicated work,
+    # and the per-Doppler power rows are stacked in the same order, so the
+    # maps are IDENTICAL to the serial ones. Small searches (a track step:
+    # 1 PRN x 7 Dopplers) and anything already inside a worker stay serial.
+    rows = None
+    if (len(prns) * len(dopplers) * n_noncoh >= 200_000
+            and _pool_allowed()):
+        rows = _acquire_rows_parallel(blocks, fs, prns, dopplers)
+    if rows is None:
+        rows = [_acquire_rows(blocks, fs, prns, fd) for fd in dopplers]
     out = {}
-    for p in prns:
-        m = np.vstack(maps[p])
+    for pi, p in enumerate(prns):
+        m = np.vstack([r[pi] for r in rows])
         di, ci = np.unravel_index(np.argmax(m), m.shape)
         mask = np.ones(m.shape[1], dtype=bool)
         for off in range(-excl, excl + 1):
@@ -163,7 +270,10 @@ def load_seg(path, fs, t0_s, dur_s):
     n0 = int(t0_s * fs) * 2
     n = int(dur_s * fs) * 2
     raw = np.memmap(path, dtype=np.int16, mode="r")[n0:n0 + n].astype(np.float32)
-    x = raw[0::2] + 1j * raw[1::2]
+    # interleaved I,Q float32 IS the memory layout of complex64: a view, not
+    # a second pass building r[0::2] + 1j*r[1::2] (measured 12 -> 0 ms per
+    # second of data; this function ran 9,799 times in one fix)
+    x = raw.view(np.complex64)
     return x - x.mean()
 
 

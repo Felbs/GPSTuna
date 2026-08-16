@@ -37,7 +37,7 @@ Method (adapted from measure.py's GPS C/A machinery):
     real bird reappears at a consistent Doppler.
 
 Usage:
-  python gal_e1.py --iq Z:/src/grid-atlas/captures/gps_attic.cs16
+  python gal_e1.py --iq your_capture.cs16
         [--fs 2048000] [--nblocks 40] [--t0 1.0] [--t1 70.0]
         [--selftest]     # synthetic -15 dB proof + sensitivity floor
 

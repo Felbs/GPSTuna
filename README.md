@@ -88,9 +88,11 @@ active patch antenna in an attic:
    Assemble integer + fraction in SV time and subtract the clock correction
    *afterward* — `af0` alone spans ±0.5 ms (±150 km) if you subtract it first.
 3. **Never trust `round()` for the integer millisecond.** Coarse times are
-   ms-quantized per satellite; pin one reference bird and exhaustively search
-   the relative integers — with ≥5 birds only the true set collapses the
-   residuals *and* lands at a sane altitude.
+   ms-quantized per satellite; pin one reference bird and search the
+   relative integers — the residuals point at a slipped bird (1 ms = 300 km
+   on *its* range), so a residual-guided pass finds them in milliseconds, with
+   coordinate descent and then an exhaustive window behind it. With ≥5 birds
+   only the true set collapses the residuals *and* lands at a sane altitude.
 
 ## Architecture (full signal chain)
 ```mermaid
@@ -197,14 +199,35 @@ made in Europe — 7 satellites, 100 % word parity, a fix in the right city.
 python locate.py                                       # one command: capture -> count -> fix
 python measure.py --selftest                           # sanity, no capture needed (synthetic -20 dB)
 python relativity.py --iq your_capture.cs16            # decode Einstein
-python fix.py --validate                               # satellite-position math
-python fix.py --iq your_capture.cs16 --multi 8         # fix, averaged over 8 epochs
+python fix.py --validate                               # ephemeris->orbit->clock math, no capture needed
+python fix.py --iq your_capture.cs16 --multi 15        # fix, averaged over 15 snapshot epochs
 python fix.py --resolve                                # re-solve from cache in seconds
 python gal_e1.py  --iq your_capture.cs16               # Galileo acquisition
 python gal_inav.py --iq your_capture.cs16 --prn 29     # Galileo I/NAV decode
 ```
 `--resolve` reuses the cached pseudoranges from the last full run, so
 experimenting with the solve never costs another decode.
+
+### How long it takes
+The capture is set by the sky, not the CPU: ephemeris arrives at 50 bit/s and
+a fix needs three subframes from each of four satellites, so **300 s** of air
+is the honest minimum for a reliable first fix (60 s gets you a satellite
+count). The processing after that, on a 300 s / 2.4 GB capture:
+
+| box | wall | note |
+|---|---|---|
+| many-core desktop | **~45 s** | satellites decode in parallel (one process each), sky search parallel over Doppler |
+| one core (`GPSTUNA_SERIAL=1`, or a Pi) | ~3 min | same code, serial fallback |
+| before 2026-08-15 | 6.5 min | serial, and the ambiguity search alone was 70 s |
+
+The speed-ups are gated bit-for-bit — every per-epoch residual, integer
+offset and coordinate on the two reference captures is unchanged. What was
+*tried and rejected on measurement*: elevation-weighted least squares (worse
+rms and scatter on both captures — with 6–7 birds the geometry loss beats
+the noise gain; `GPSTUNA_WEIGHT=elev` still switches it on) and decoding the
+sub-3.5-metric "weak" birds (one decoded fine at 37 dB-Hz and 14° elevation
+and made the fix worse; one did not decode). Fifteen snapshot epochs instead
+of five was the one accuracy change that measured better on both captures.
 
 ## Recreating this — the field guide
 

@@ -233,28 +233,50 @@ def tropo_delay(el):
     return 2.47 / (np.sin(el) + 0.0121)
 
 
-def solve(sats):
-    """sats = [(ecef_xyz, pseudorange_m)]. LS for (x,y,z,c*dt)."""
-    x = np.array([0.0, 0.0, 0.0, 0.0])
+def solve(sats, weights=None):
+    """sats = [(ecef_xyz, pseudorange_m)]. LS for (x,y,z,c*dt).
+
+    Vectorised over satellites (same Gauss-Newton, same 12-iteration /
+    1 mm stop): this is called ~60,000 times in one fix and the per-bird
+    Python loop with np.append was 2.8 M array builds. `weights` (optional,
+    one per satellite) turns it into weighted LS -- sqrt(w) scales the
+    rows, so w = 1 everywhere reproduces the unweighted solve exactly."""
+    SP = np.asarray([sp for sp, _ in sats], dtype=float)      # (n, 3)
+    PR = np.asarray([pr for _, pr in sats], dtype=float)      # (n,)
+    n = len(PR)
+    x = np.zeros(4)
+    A = np.empty((n, 4))
+    A[:, 3] = 1.0
+    if weights is not None:
+        sw = np.sqrt(np.asarray(weights, dtype=float))[:, None]
     for _ in range(12):
-        A, res = [], []
-        for sp, pr in sats:
-            d = x[:3] - sp
-            rng = np.linalg.norm(d)
-            A.append(np.append(d / rng, 1.0))
-            res.append(pr - (rng + x[3]))
-        A = np.array(A)
-        dx, *_ = np.linalg.lstsq(A, np.array(res), rcond=None)
+        d = x[:3] - SP                                        # (n, 3)
+        rng = np.sqrt((d * d).sum(axis=1))
+        A[:, :3] = d / rng[:, None]
+        res = PR - (rng + x[3])
+        if weights is not None:
+            dx, *_ = np.linalg.lstsq(A * sw, res * sw[:, 0], rcond=None)
+        else:
+            dx, *_ = np.linalg.lstsq(A, res, rcond=None)
         x = x + dx
         if np.linalg.norm(dx[:3]) < 1e-3:
             break
     return x
 
 
-def solve_prs(prs):
+def solve_prs(prs, weights=None):
     """prs = [(prn, eph, t_gps_tx)] at a common receive epoch. Iterates the
     unknown receive time, Sagnac-rotates each satellite by its travel time,
     LS-solves. Returns (rms_m, lat, lon, h, x)."""
+    rms, lat, lon, h, x, _res = solve_prs_full(prs, weights)
+    return rms, lat, lon, h, x
+
+
+def solve_prs_full(prs, weights=None):
+    """solve_prs, also returning the per-satellite residuals (m, in prs
+    order) -- the ambiguity search reads them. `weights` (per satellite)
+    makes the LS weighted; the reported rms stays UNWEIGHTED so runs with
+    and without weights are comparable."""
     t_rx = max(t for _, _, t in prs) + 0.075
     x = np.array([0.0, 0.0, 0.0, 0.0])
     sats = []
@@ -267,12 +289,13 @@ def solve_prs(prs):
             rot = np.array([[np.cos(th), np.sin(th), 0],   # rx-epoch frame
                             [-np.sin(th), np.cos(th), 0], [0, 0, 1]])
             sats.append((rot @ sp, C * (t_rx - t_tx)))
-        x = solve(sats)
+        x = solve(sats, weights)
         t_rx -= x[3] / C                          # absorb clock into epoch
-    res = [pr - (np.linalg.norm(x[:3] - sp) + x[3]) for sp, pr in sats]
+    res = np.array([pr - (np.linalg.norm(x[:3] - sp) + x[3])
+                    for sp, pr in sats])
     rms = float(np.sqrt(np.mean(np.square(res))))
     lat, lon, h = ecef_to_llh(x[:3])
-    return rms, lat, lon, h, x
+    return rms, lat, lon, h, x, res
 
 
 def solve_snapshot(entries):
@@ -295,28 +318,115 @@ def solve_snapshot(entries):
     frac = [(-e["phi_ms"]) % 1.0 for e in entries]
     N0 = [np.round(e["t_sv_coarse"] * 1e3 - f)
           for e, f in zip(entries, frac)]
+
+    def assemble(offs):
+        prs = []
+        for k, e in enumerate(entries):
+            t_sv_tx = (N0[k] + offs[k] + frac[k]) * 1e-3
+            t_gps_tx = t_sv_tx - clock_corr(e["eph"], t_sv_tx)
+            prs.append((e["prn"], e["eph"], t_gps_tx))
+        return prs
+
     # a COMMON integer shift across all birds is absorbed by the receiver
-    # clock (unobservable) - pin bird 0 and search only RELATIVE offsets,
-    # re-centering if the best sits on the +-1 window edge.
+    # clock (unobservable) - pin bird 0 and search only RELATIVE offsets.
     total = [0] * n
-    for _round in range(4):
+    # STAGE 1 -- residual-guided (8/15). One millisecond of integer slip on
+    # one bird is c*1 ms = 299.8 km on THAT bird's pseudorange, and the LS
+    # residuals point straight at it: solve, round each residual to whole
+    # milliseconds of range, apply, repeat until nothing moves. Typically 1-3
+    # solves where the exhaustive search below did 3^(n-1) per round (729 for
+    # 7 birds, ~70 s of a 390 s fix). Same answer -- gated below.
+    KM_PER_MS = C * 1e-3
+    converged = False
+    for _it in range(3 * n):
+        rms, lat, lon, h, x, res = solve_prs_full(assemble(total))
+        step = np.round(res / KM_PER_MS).astype(int)
+        # NOT pinned here: a slip on bird 0 has to be correctable too (the
+        # 8/15 gate: every unsolved pattern had the pin slipped). The common
+        # shift is removed once, below, before returning.
+        if not step.any():
+            converged = True
+            break
+        # one bird per pass -- the LARGEST residual. With two or more slips
+        # the LS smears each error over its neighbours; correcting them all
+        # at once from the smeared residuals can oscillate, correcting the
+        # worst one and re-solving does not (the sequential-RAIM shape).
+        k = int(np.argmax(np.abs(res) * (step != 0)))
+        total[k] += int(step[k])
+    total = [t - total[0] for t in total]     # pin bird 0 (convention)
+    if converged and rms < 1000.0 and -3000 < h < 9000:
+        return rms, lat, lon, h, total
+    # STAGE 1b -- coordinate descent, +-2 ms per bird, sweeps until stable.
+    # Reaches the patterns stage 1 cannot (a slip on the pinned bird makes
+    # every other bird's RELATIVE offset +-1 or +-2, and residual rounding
+    # smears that) at ~5 solves per bird per sweep. The 8/15 gate found two
+    # 2-slip patterns where the exhaustive +-1 search below returned 69 km
+    # and 127 km "solutions"; this stage solves both to 32 m.
+    def score(offs):
+        r, la, lo, hh, xx = solve_prs(assemble(offs))
+        return r + (0 if -3000 < hh < 9000 else 1e6), r, la, lo, hh
+    cur = score(total)
+    for _sweep in range(6):
+        moved = False
+        for k in range(1, n):                 # bird 0 stays pinned
+            best_o, best_s = total[k], cur
+            for o in (-2, -1, 1, 2):
+                trial = list(total)
+                trial[k] += o
+                sc = score(trial)
+                if sc[0] < best_s[0] - 1e-9:
+                    best_o, best_s = trial[k], sc
+            if best_o != total[k]:
+                total[k] = best_o
+                cur = best_s
+                moved = True
+        if not moved:
+            break
+    _, rms, lat, lon, h = cur
+    if rms < 1000.0 and -3000 < h < 9000:
+        return rms, lat, lon, h, total
+    # STAGE 2 -- the exhaustive +-1 relative search, as before, for the
+    # cases the residuals cannot untangle (few birds, poor geometry, a
+    # gross outlier). Starts from wherever stage 1 left off.
+    # Window: +-2 per bird when that stays under ~4000 solves (n <= 6), else
+    # +-1 -- this stage only runs when the alternative is NO FIX, and the
+    # 8/15 gate's last six 2-slip patterns needed a relative +-2 together
+    # with an opposite-sign move that a +-1 window walks into a local
+    # minimum on.
+    wide = 5 ** (n - 1) <= 4000
+    win = (-2, -1, 0, 1, 2) if wide else (-1, 0, 1)
+    for _round in range(2 if wide else 4):
         best = None
-        for rel in itertools.product((-1, 0, 1), repeat=n - 1):
+        for rel in itertools.product(win, repeat=n - 1):
             offs = (0,) + rel
-            prs = []
-            for k, e in enumerate(entries):
-                t_sv_tx = (N0[k] + total[k] + offs[k] + frac[k]) * 1e-3
-                t_gps_tx = t_sv_tx - clock_corr(e["eph"], t_sv_tx)
-                prs.append((e["prn"], e["eph"], t_gps_tx))
-            rms, lat, lon, h, x = solve_prs(prs)
+            trial = [t + o for t, o in zip(total, offs)]
+            rms, lat, lon, h, x = solve_prs(assemble(trial))
             score = rms + (0 if -3000 < h < 9000 else 1e6)
             if best is None or score < best[0]:
                 best = (score, rms, lat, lon, h, offs)
+                if score < 100.0:             # a real fix: stop searching
+                    break
         _, rms, lat, lon, h, offs = best
         total = [t + o for t, o in zip(total, offs)]
-        if all(o == 0 for o in offs):
+        if all(o == 0 for o in offs) or rms < 100.0:
             break
     return rms, lat, lon, h, total
+
+
+import os as _os_w
+WEIGHTING = _os_w.environ.get("GPSTUNA_WEIGHT", "none")
+
+
+def elevation_weight(el_rad):
+    """Per-satellite LS weight from elevation. Low satellites carry more
+    troposphere, ionosphere and multipath error than the models remove;
+    the usual single-frequency variance model is sigma^2 = a^2 + b^2 /
+    sin^2(el). GPSTUNA_WEIGHT=none reproduces the unweighted solve."""
+    if WEIGHTING == "none":
+        return 1.0
+    a, b = 0.5, 1.0
+    s = max(np.sin(el_rad), 0.05)
+    return 1.0 / (a * a + (b * b) / (s * s))
 
 
 def solve_final(entries):
@@ -343,7 +453,7 @@ def solve_final(entries):
     _, _, _, _, x0 = solve_prs(prs0)
     iono = next((e["eph"] for e in entries
                  if "iono_a" in e["eph"] and "iono_b" in e["eph"]), None)
-    extra, els = [], []
+    extra, els, wts = [], [], []
     for prn, eph, t_tx in prs0:
         az, el = az_el(x0[:3], sat_ecef(eph, t_tx))
         els.append(round(float(np.degrees(el)), 1))
@@ -352,20 +462,90 @@ def solve_final(entries):
             d += klobuchar(iono["iono_a"], iono["iono_b"], lat0, lon0,
                            az, el, t_tx)
         extra.append(d)
-    rms, lat, lon, h, x = solve_prs(assemble(extra))
+        wts.append(elevation_weight(el))
+    rms, lat, lon, h, x = solve_prs(assemble(extra), wts)
     return {"rms": rms, "lat": lat, "lon": lon, "h": h, "x": x,
             "offsets": total, "raw_rms": rms0, "raw_h": h0,
             "iono": iono is not None, "el_deg": els}
 
 
-def validate():
-    """Decode our 2-bird capture, compute each satellite's ECEF at its toe,
-    check the altitude is the GPS shell (~20,200 km). Proves the whole
-    ephemeris->ECEF chain without needing a 4-bird fix."""
+# A real broadcast ephemeris (PRN 9, GPS week 384 mod 1024, toe 7200 s), as
+# every receiver on Earth received it -- public by construction, and it
+# reveals nothing about where it was received. --validate exercises the
+# ephemeris -> ECEF -> clock chain against it with no capture at all.
+VALIDATE_EPH = {
+    "prn": 9, "WN": 384, "IODE2": 21, "toe": 7200.0, "toc": 7200.0,
+    "sqrtA": 5153.677988052368, "e": 0.0037707004230469465,
+    "M0": 0.4683617065393228, "dn": 4.7612697545679945e-09,
+    "omega": 2.0456646482237035, "i0": 0.9666972893594765,
+    "Omega0": 2.1252002053131904, "OmegaDot": -8.454995041623894e-09,
+    "IDOT": 6.750281176305986e-11,
+    "Cuc": -1.0579824447631836e-06, "Cus": 3.6582350730895996e-06,
+    "Crc": 309.625, "Crs": -18.96875,
+    "Cic": -7.450580596923828e-09, "Cis": -5.587935447692871e-08,
+    "af0": 0.0007003778591752052, "af1": -7.958078640513122e-12, "af2": 0.0,
+}
+
+
+def validate(path=None):
+    """Prove the ephemeris -> satellite-position -> clock chain WITHOUT a
+    capture (with one, --iq, it also decodes and checks every bird in it).
+    Physical invariants, each a number the code cannot fake:
+      * orbit radius at toe in the GPS shell (26,560 +- 100 km, e = 0.004);
+      * speed from finite differences ~3.87 km/s (a circular orbit at that
+        radius: sqrt(mu / r));
+      * one sidereal-ish period later (43,082 s) the INERTIAL position
+        repeats: rotate the ECEF result back by Earth's spin and compare;
+      * the clock correction is af0 (0.7 ms here) plus a relativistic term
+        of order F*e*sqrtA ~ tens of ns.
+    Before 8/15 this read a capture from the author's disk, so on any other
+    machine `--validate` -- and the locate.py fallback that calls it --
+    printed "No IQ capture" and proved nothing."""
+    ok_all = True
+
+    def check(name, cond, detail):
+        nonlocal ok_all
+        ok_all &= bool(cond)
+        print(f"  [{'ok' if cond else 'FAIL'}] {name}: {detail}")
+
+    eph = dict(VALIDATE_EPH)
+    t = eph["toe"]
+    p0 = sat_ecef(eph, t)
+    r = np.linalg.norm(p0)
+    check("orbit radius", 26_460e3 < r < 26_660e3,
+          f"|r| = {r/1e3:,.1f} km at toe (GPS shell 26,560 km)")
+    dt = 1.0
+    v_ecef = (sat_ecef(eph, t + dt) - sat_ecef(eph, t - dt)) / (2 * dt)
+    # ECEF velocity carries Earth's spin; the Kepler speed is INERTIAL:
+    # v_i = v_ecef + omega x r
+    v_i = v_ecef + np.cross([0.0, 0.0, OMEGA_E], p0)
+    v = np.linalg.norm(v_i)
+    v_circ = np.sqrt(MU / r)
+    check("orbital speed", abs(v - v_circ) < 60.0,
+          f"{v:,.1f} m/s inertial (ECEF {np.linalg.norm(v_ecef):,.1f}), "
+          f"circular {v_circ:,.1f} m/s")
+    T = 43_082.0
+    p1 = sat_ecef(eph, t + T)
+    th = OMEGA_E * T                              # undo Earth's rotation
+    rot = np.array([[np.cos(th), -np.sin(th), 0],
+                    [np.sin(th), np.cos(th), 0], [0, 0, 1]])
+    d = np.linalg.norm(rot @ p1 - p0)
+    check("period repeat", d < 60e3,
+          f"inertial position after one period differs by {d/1e3:,.1f} km "
+          f"(perturbations only)")
+    dclk = clock_corr(eph, t)
+    check("clock correction", abs(dclk - eph["af0"]) < 1e-7,
+          f"{dclk*1e3:.4f} ms (af0 {eph['af0']*1e3:.4f} ms, relativistic "
+          f"{(dclk-eph['af0'])*1e9:+.1f} ns)")
+    lat, lon, h = ecef_to_llh(p0)
+    check("llh round trip", abs(h - (r - 6_371e3)) < 30e3 and abs(lat) < 60,
+          f"sub-satellite point lat {lat:+.1f} deg, height {h/1e3:,.0f} km")
+    print(f"[fix] validate: {'ALL CHECKS PASSED' if ok_all else 'FAILED'} "
+          f"(ephemeris -> ECEF -> clock chain, no capture needed)")
+    if not path:
+        return 0 if ok_all else 1
+    # with a capture: decode every acquirable bird and check its shell radius
     fs = 2.048e6
-    # validate the ECEF math on the PROVEN-good navbits capture (PRN15 fully
-    # decodes there); the 2-bird fix capture is weaker.
-    path = str(HERE.parent / "captures" / "gps_l1_navbits.cs16")
     from measure import require_capture
     require_capture(path)
     dur = Path(path).stat().st_size / 4 / fs
@@ -383,9 +563,11 @@ def validate():
         rr = np.linalg.norm(pos) / 1e3
         full = {"omega", "i0", "Omega0"}.issubset(eph)
         ok = 26000 < rr < 27200               # GPS orbit radius (dir needs sf3)
+        ok_all &= ok
         print(f"  PRN{prn}: orbit radius |r|={rr:,.1f} km  "
               f"{'VALID GPS shell' if ok else 'OUT OF RANGE'}  "
               f"(ephemeris {'COMPLETE - full 3D position ready' if full else 'radius-only, sf3 partial'})")
+    return 0 if ok_all else 1
 
 
 def resolve_from_cache():
@@ -424,7 +606,9 @@ def resolve_from_cache():
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--iq", default=str(HERE.parent / "captures" / "gps_fix_20260725.cs16"))
+    ap.add_argument("--iq", default=None,
+                    help="raw L1 IQ capture (2.048 Msps int16 IQ); required "
+                         "unless --validate or --resolve")
     ap.add_argument("--fs", type=float, default=2.048e6)
     ap.add_argument("--validate", action="store_true")
     ap.add_argument("--resolve", action="store_true",
@@ -433,10 +617,12 @@ def main():
                     help="solve at N snapshot epochs and average (shrinks noise)")
     a = ap.parse_args()
     if a.validate:
-        return validate()
+        return validate(a.iq)
     if a.resolve:
         return resolve_from_cache()
     fs = a.fs
+    if not a.iq:
+        ap.error("--iq CAPTURE is required (or use --validate / --resolve)")
     require_capture(a.iq)
     dur = Path(a.iq).stat().st_size / 4 / fs
     x = load_seg(a.iq, fs, 0.5, 0.310)
@@ -454,20 +640,73 @@ def main():
     return full_fix(a.iq, fs, det, dur, multi=a.multi)
 
 
+def _decode_one(job):
+    """Pool worker: decode one PRN, capture its prints. Top-level so it
+    pickles under the spawn start method (Windows, macOS)."""
+    import io as _io
+    import contextlib as _ctx
+    path, fs, prn, dopp, dur = job
+    buf = _io.StringIO()
+    try:
+        with _ctx.redirect_stdout(buf):
+            eph, tim = decode_eph(path, fs, prn, dopp, dur, want_timing=True)
+        return (prn, eph, tim, None, buf.getvalue())
+    except Exception as e:                                   # noqa: BLE001
+        return (prn, None, None, f"{type(e).__name__}: {e}", buf.getvalue())
+
+
+def _decode_all(jobs):
+    """Run _decode_one over all birds, in parallel when there is more than
+    one bird and more than one core; serial otherwise (and serial as the
+    fallback if the pool cannot start -- a locked-down interpreter, a
+    frozen build -- so a pool problem can never cost the fix)."""
+    import os as _os
+    from measure import _pool_allowed, pool_timeout
+    n_workers = min(len(jobs), max(1, (_os.cpu_count() or 1)))
+    if n_workers > 1 and _pool_allowed():
+        try:
+            import multiprocessing as _mp
+            # Children inherit the environment and import numpy fresh: pin
+            # their BLAS to one thread each. The matmuls here are 100x2048;
+            # N workers x a 64-thread BLAS on ops that size is a thread
+            # storm, not parallelism (measured elsewhere on this fleet:
+            # 480 % CPU for 0.09x). The parent's own numpy is unaffected.
+            for _v in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS",
+                       "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+                _os.environ.setdefault(_v, "1")
+            ctx = _mp.get_context("spawn")
+            with ctx.Pool(n_workers) as pool:
+                # serial cost ~ 1.5 s per second of capture per bird on a
+                # slow core; the pool must beat that by a lot or it is dead
+                dur = max(float(j[4]) for j in jobs)
+                est = 1.5 * min(dur, 120.0) * len(jobs)
+                res = pool.map_async(_decode_one, jobs)
+                return res.get(timeout=pool_timeout(est))
+        except Exception as e:                               # noqa: BLE001
+            print(f"  (process pool unavailable: {type(e).__name__}: {e}; "
+                  f"decoding serially)")
+    return [_decode_one(j) for j in jobs]
+
+
 def full_fix(path, fs, det, dur, multi=1):
     """The final stage: coarse-time from each bird's nav-bit grid
     (millisecond-accurate subframe clocks) + sub-millisecond from a
     common-epoch acquisition snapshot -> pseudoranges -> solve().
     The computed position goes ONLY to lab_local/ (gitignored)."""
     import json as _json
-    # 1. per-bird nav decode with timing anchors
+    # 1. per-bird nav decode with timing anchors -- one process per bird.
+    # Every satellite's track/decode is independent, and before 8/15 they
+    # ran one after another: 285 of a 390 s fix. The pool sizes itself to
+    # the birds and the box (a Pi with 4 cores gets 4-wide, this desktop 7).
+    # Each worker returns its own log so the output stays ordered by PRN.
     birds = {}
-    for prn, r in det.items():
-        try:
-            eph, tim = decode_eph(path, fs, prn, r["dopp"], dur,
-                                  want_timing=True)
-        except Exception as e:
-            print(f"  PRN{prn}: decode failed ({e})")
+    jobs = [(path, fs, prn, r["dopp"], dur) for prn, r in det.items()]
+    results = _decode_all(jobs)
+    for (prn, eph, tim, err, log_txt) in results:
+        if log_txt:
+            print(log_txt.rstrip("\n"))
+        if err:
+            print(f"  PRN{prn}: decode failed ({err})")
             continue
         need = {"sqrtA", "e", "M0", "toe", "omega", "i0", "Omega0", "af0"}
         missing = need - set(eph)
