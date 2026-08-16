@@ -242,6 +242,50 @@ def acquire(x, fs, prns, dopplers, n_noncoh):
     return out
 
 
+def check_sidecar(path, fs, expect_dtype="int16"):
+    """If a SigMF sidecar (<name>.sigmf-meta) sits beside the capture, READ
+    it and refuse a mismatch loudly. Every tool here assumes interleaved
+    int16 at `fs`; a recording at another rate or datatype does not fail --
+    it acquires nothing and the advice that follows says "move the antenna",
+    which is the wrong advice. The one external capture this project has
+    seen so far arrived as SigMF (8/15), so this is the common case, not
+    the edge case. Returns the sidecar's sample rate when it names one."""
+    import json as _json
+    import os as _os
+    base, ext = _os.path.splitext(path)
+    cands = [base + ".sigmf-meta", path + ".sigmf-meta"]
+    if ext.lower() == ".sigmf-data":
+        cands.insert(0, base + ".sigmf-meta")
+    for c in cands:
+        if not _os.path.isfile(c):
+            continue
+        try:
+            with open(c, "r", encoding="utf-8", errors="replace") as fh:
+                g = (_json.load(fh) or {}).get("global", {}) or {}
+        except Exception:                                    # noqa: BLE001
+            return None
+        problems = []
+        rate = g.get("core:sample_rate")
+        dt = str(g.get("core:datatype", "")).lower()
+        if rate is not None and abs(float(rate) - fs) > 1.0:
+            problems.append(f"sample rate {float(rate):,.0f} Sps, but this "
+                            f"run assumes {fs:,.0f} (pass --fs {float(rate):.0f}"
+                            f" if the tool has it, or resample the file)")
+        if dt and not dt.startswith(("ci16", "cs16")):
+            problems.append(f"datatype '{g.get('core:datatype')}', but these "
+                            f"tools read interleaved int16 (ci16_le); "
+                            f"convert first")
+        if problems:
+            raise SystemExit(
+                f"\nThe SigMF sidecar {c} says this capture is not what the "
+                f"tools assume:\n  * " + "\n  * ".join(problems) +
+                "\nRefusing to run: at the wrong rate acquisition finds "
+                "nothing and the advice that follows\n(\"move the antenna\") "
+                "would be wrong.\n")
+        return float(rate) if rate is not None else None
+    return None
+
+
 def require_capture(path):
     """Fail with an explanation instead of a FileNotFoundError traceback.
 

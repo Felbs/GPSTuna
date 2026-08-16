@@ -624,6 +624,8 @@ def main():
     if not a.iq:
         ap.error("--iq CAPTURE is required (or use --validate / --resolve)")
     require_capture(a.iq)
+    from measure import check_sidecar
+    check_sidecar(a.iq, fs)
     dur = Path(a.iq).stat().st_size / 4 / fs
     x = load_seg(a.iq, fs, 0.5, 0.310)
     acq = acquire(x, fs, list(range(1, 33)), np.arange(-7000, 7001, 250.0), 300)

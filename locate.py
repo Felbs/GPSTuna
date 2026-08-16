@@ -32,7 +32,7 @@ except Exception:                                                # noqa: BLE001
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from measure import acquire, load_seg, require_capture
+from measure import acquire, check_sidecar, load_seg, require_capture
 from fix import full_fix
 
 FS = 2.048e6
@@ -261,6 +261,7 @@ def main():
     a = ap.parse_args()
     path = a.iq or capture(a.secs, a.antenna)
     require_capture(path)
+    check_sidecar(path, FS)
     dur = Path(path).stat().st_size / 4 / FS
     x = load_seg(path, FS, 0.5, 0.400)
     acq = acquire(x, FS, list(range(1, 33)), np.arange(-7000, 7001, 250.0), 400)
