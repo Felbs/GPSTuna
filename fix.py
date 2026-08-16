@@ -753,9 +753,36 @@ def full_fix(path, fs, det, dur, multi=1):
     # and the fit residual is a built-in truth check (microseconds = right,
     # anything more = broken)
     fits = {}
+    n1 = int(round(fs * 1e-3))
     for prn, (eph, tim) in birds.items():
-        ft = np.array([1.0 + (tim["tent"] + 20.0 * i) * 1e-3
-                       for i, _sf, _tw in tim["anchors"]], float)
+        # Receiver time of each anchor's bit edge. The bit begins at a CODE
+        # EPOCH, and that epoch sits INSIDE the tent prompt at the code
+        # phase the track model gives (slope*t + icpt samples -- the same
+        # model prompt_stream rolls the replica by), wrapped to the nearest
+        # prompt boundary. Before 8/15 this used the prompt boundary alone,
+        # so every bird's coarse SV time carried a constant 0..1 ms error
+        # -- measured on a live capture: t_sv*1e3 - frac landed at .46 .52
+        # .23 .18 .35 .54 .59 across seven birds, i.e. round() was a coin
+        # flip for three of them and the integer-ms search had to rescue
+        # most epochs (1,400 solves each). With the epoch position in the
+        # fit the coarse time is microsecond-accurate and the search
+        # converges on its first solve.
+        # The epoch DRIFTS through the prompt (~6 samples/s at 5 kHz of
+        # Doppler, a whole period per ~5 min), so wrap ONCE -- at the tent
+        # time, where the tent chose the nearest boundary -- and carry the
+        # position forward continuously with the slope; a per-anchor wrap
+        # would put a 1 ms step into ft where the epoch crosses the prompt
+        # middle and break the fit (measured: later epochs at 40-120 km).
+        _tr = tim["tr"]
+        t_tent = 1.0 + tim["tent"] * 1e-3
+        c0 = (_tr["slope"] * t_tent + _tr["icpt"]) % n1
+        c0 = ((c0 + n1 / 2.0) % n1) - n1 / 2.0          # signed, nearest
+        ft = []
+        for i, _sf, _tw in tim["anchors"]:
+            t_prompt = 1.0 + (tim["tent"] + 20.0 * i) * 1e-3
+            c = c0 + _tr["slope"] * (t_prompt - t_tent)
+            ft.append(t_prompt + c / fs)
+        ft = np.array(ft, float)
         st = np.array([tw * 6.0 - 6.0 for _i, _sf, tw in tim["anchors"]],
                       float)
         aa, bb = np.polyfit(ft, st, 1)
