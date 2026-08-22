@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>GPSTuna — GRCon26 lightning talk</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{--bg:#0b0f14;--fg:#e8edf2;--dim:#8b98a5;--acc:#ffb454;--acc2:#5ad1ff;--ok:#5ee09a;--box:#141b24;--line:#26303c}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;background:var(--bg);color:var(--fg);font:clamp(15px,1.55vw,22px)/1.35 "Segoe UI",Inter,system-ui,sans-serif}
+.deck{height:100%;overflow:hidden}
+.slide{display:none;height:100%;padding:4vh 5vw;flex-direction:column;gap:22px}
+.slide.on{display:flex}
+h1{font-size:clamp(34px,4.6vw,64px);line-height:1.05;letter-spacing:-.5px;max-width:1100px}
+h2{font-size:clamp(26px,3.2vw,44px);line-height:1.1;color:var(--acc)}
+.sub{font-size:clamp(18px,2vw,28px);color:var(--dim)}
+.kicker{font-size:18px;letter-spacing:.18em;text-transform:uppercase;color:var(--acc2)}
+ul{list-style:none;font-size:clamp(17px,2vw,28px);display:grid;gap:14px}
+li::before{content:"▸ ";color:var(--acc)}
+li b{color:#fff}
+.row{display:flex;gap:28px;align-items:stretch;flex:1;min-height:0}
+.col{flex:1;min-width:0}
+.big{font-size:96px;font-weight:700;line-height:1;color:var(--ok)}
+.stat{background:var(--box);border:1px solid var(--line);border-radius:14px;padding:22px 26px;display:flex;flex-direction:column;gap:6px}
+.stat .v{font-size:clamp(30px,4vw,56px);font-weight:700;color:#fff;line-height:1}
+.stat .k{font-size:19px;color:var(--dim)}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+.chain{display:flex;flex-wrap:wrap;gap:10px;align-items:center;font-size:clamp(14px,1.5vw,21px)}
+.chain .st{background:var(--box);border:1px solid var(--line);border-radius:10px;padding:12px 16px;white-space:nowrap}
+.chain .st small{display:block;color:var(--dim);font-size:15px;white-space:normal}
+.chain .ar{color:var(--acc);font-size:26px}
+.chain .ours{border-color:var(--acc)}
+img.frame{width:100%;height:100%;object-fit:contain;border-radius:12px;border:1px solid var(--line);background:#000}
+.foot{margin-top:auto;display:flex;justify-content:space-between;font-size:17px;color:var(--dim)}
+.foot a{color:var(--acc2);text-decoration:none}
+.url{font-family:Consolas,monospace;color:var(--acc2)}
+.notes{display:none;position:fixed;right:0;bottom:0;width:38%;max-height:45%;overflow:auto;background:#1b2430;color:#d7e0ea;border-top-left-radius:14px;padding:16px 20px;font-size:16px;line-height:1.4;border:1px solid var(--line);box-shadow:0 0 30px #000a}
+body.show-notes .slide.on .notes{display:block}
+.pg{position:fixed;left:24px;bottom:16px;color:var(--dim);font-size:15px}
+@media print{
+  html,body{background:#fff;color:#111;height:auto}
+  :root{--fg:#111;--dim:#555;--box:#f3f5f7;--line:#ccd;--acc:#b35a00;--acc2:#0b63b8;--ok:#117a46}
+  .deck{overflow:visible}
+  .slide{display:flex!important;height:100vh;page-break-after:always;break-after:page}
+  .notes,.pg{display:none!important}
+  h1,h2,.big,.stat .v{color:inherit}
+}
+</style></head><body>
+<div class="deck">
+
+<!-- 1 -->
+<section class="slide on">
+  <div class="kicker">GRCon26 · lightning talk · 5 minutes</div>
+  <h1>GPSTuna<br>— a software GPS <i>and</i> Galileo receiver from raw SDR IQ</h1>
+  <p class="sub">Acquisition to a joint GPS + Galileo position fix, in Python, from a 90-second capture on a hobby SDR. Plus a relativity experiment you can repeat.</p>
+  <div class="chain" style="margin-top:8px">
+    <span class="st">L1 antenna + bias-T</span><span class="ar">→</span>
+    <span class="st">RTL-SDR / RSPdx / B210 — any IQ file</span><span class="ar">→</span>
+    <span class="st ours">GPSTuna <small>acquire · track · nav decode · ephemeris · pseudoranges · fix</small></span><span class="ar">→</span>
+    <span class="st">position, time, your crystal's error in ppb</span>
+  </div>
+  <div class="foot"><span>Felbs · independent · Baltimore</span><span class="url">github.com/Felbs/GPSTuna</span></div>
+  <div class="notes"><b>Say (30 s):</b> A GNSS receiver written from the spec, start to finish, that takes a raw IQ file from any SDR and produces a position — from GPS and Galileo together. It's a teaching receiver as much as a working one: every step is a readable function, and every number on these slides came out of it.</div>
+</section>
+
+<!-- 2 -->
+<section class="slide">
+  <div class="kicker">Why this room should care</div>
+  <h2>Every GNSS textbook step, as code you can read — and it actually fixes.</h2>
+  <ul>
+    <li><b>GPS L1 C/A</b>: parallel code-phase × Doppler FFT acquisition → carrier + code tracking → 50 bps nav decode → ephemeris → IS-GPS-200 Kepler solve with harmonic corrections, Sagnac, tropo/iono.</li>
+    <li><b>Galileo E1-B</b>: CBOC acquisition, full I/NAV decoder — <b>1161 / 1161 pages CRC-clean</b> across three satellites; Galileo System Time read off the air; the GPS–Galileo time offset decodes to +6.0 ns.</li>
+    <li><b>Joint fix</b>: 6 GPS + 3 Galileo solved together with the inter-system offset as a fifth unknown.</li>
+    <li>Tables fetched at runtime; a <b>--selftest</b> synthesises a complete E1 signal and decodes it.</li>
+  </ul>
+  <div class="foot"><span>2 / 6</span><span>fix.py · gal_e1.py · gal_inav.py · joint_fix.py</span></div>
+  <div class="notes"><b>Say (50 s):</b> Every block in a GNSS receiver diagram exists here as one readable function, and the chain closes. Galileo is fully decoded — eleven hundred pages, every CRC clean — and the two constellations are solved together with their time offset as an unknown. That offset comes out at six nanoseconds, which is the right order of magnitude for the broadcast GGTO.</div>
+</section>
+
+<!-- 3 -->
+<section class="slide">
+  <div class="kicker">Measured, not claimed</div>
+  <h2>Metres from a 90-second hobby capture.</h2>
+  <div class="grid">
+    <div class="stat"><span class="v">26.8 m</span><span class="k">joint GPS+Galileo mean rms · 15.4 m repeatability</span></div>
+    <div class="stat"><span class="v">~45 m</span><span class="k">GPS-only mean residual · 14 m repeatability</span></div>
+    <div class="stat"><span class="v">11.8 m</span><span class="k">scatter with carrier (Hatch) smoothing</span></div>
+    <div class="stat"><span class="v">+797 ppb</span><span class="k">SDR crystal error, 2.3 Hz agreement across 7 satellites</span></div>
+    <div class="stat"><span class="v">9m55 → 47 s</span><span class="k">time-to-fix on a contributed capture after the speed campaign</span></div>
+    <div class="stat"><span class="v">6 / 6</span><span class="k">satellites decoded on a Raspberry Pi, 35 m fix</span></div>
+  </div>
+  <ul style="font-size:23px">
+    <li><b>First external capture</b> (a B210 with a rubidium reference, in Europe): the pre-fix code put him ~1000 km off and said SOLVED; the fixed code puts him in the right city — and <b>refuses to call a non-solution a fix</b>.</li>
+  </ul>
+  <div class="foot"><span>3 / 6</span><span>positions live only in a git-ignored local dir — the repo never learns where you are</span></div>
+  <div class="notes"><b>Say (45 s):</b> Accuracy in the tens of metres from a 90-second file on a hobby radio, better with carrier smoothing. The crystal calibration is free: measured minus predicted Doppler gives your oscillator error in parts per billion, agreeing to two hertz across seven birds. And the first stranger's capture taught the most important lesson on the next slide.</div>
+</section>
+
+<!-- 4 -->
+<section class="slide">
+  <div class="kicker">Lessons with teeth</div>
+  <h2>Three bugs that looked like physics.</h2>
+  <ul>
+    <li><b>The Doppler-median bug</b>: a median of Doppler samples instead of a fit meant every satellite with &gt; 0.5 Hz/s rate decoded as noise — while acquisition looked perfectly healthy. Pi went 2/6 → 6/6. <i>Bimodal results ⇒ stop blaming the signal.</i></li>
+    <li><b>Code milliseconds tick on the satellite's clock</b>, not GPS time: assemble integer + fraction in SV time, then subtract the clock correction. A millisecond-ambiguity search had been papering over this since day one.</li>
+    <li><b>A gate that names its failure and then says SOLVED is worse than no gate</b>: the receiver now refuses to report a fix it cannot justify.</li>
+    <li>The fun one: an eccentric satellite (e = 0.168) from the classic <b>gravitational-redshift tests</b> — the decoder read its elliptical ephemeris and its do-not-use flag, and the ±39 ns per-orbit relativistic clock term falls straight out.</li>
+  </ul>
+  <div class="foot"><span>4 / 6</span><span>each lesson is a regression gate now</span></div>
+  <div class="notes"><b>Say (55 s):</b> Three bugs that wore the costume of a hardware limit. A median where a fit belonged silently killed every fast-moving satellite while the acquisition plots looked great. Millisecond assembly in the wrong time base. And a solver that reported success after describing its own failure. Each is now a test. The relativity one is just joy: the ±39 nanosecond eccentricity term is right there in the data.</div>
+</section>
+
+<!-- 5 -->
+<section class="slide">
+  <div class="kicker">Why it's fast enough to be useful</div>
+  <h2>From 10 minutes to under a minute, with identical fixes.</h2>
+  <ul>
+    <li>Same fixes before and after to the metre — <b>the speed campaign was gated on identity</b>, not on "looks right".</li>
+    <li>Live capture on the desk: 9 m 55 s → 5 m 45 s. A contributed 90 s file: 6 m 30 s → <b>47 s</b>.</li>
+    <li><b>--validate</b> replays recorded captures with no radio — the regression suite a stranger can run.</li>
+    <li>SigMF sidecar guard: a capture whose sample count doesn't match wall-time × fs is <b>VOID</b>, never "a bit noisy".</li>
+    <li>Rejected along the way, with numbers: elevation weighting (no gain on these captures).</li>
+  </ul>
+  <div class="foot"><span>5 / 6</span><span><span class="url">python fix.py capture.sigmf --validate</span></span></div>
+  <div class="notes"><b>Say (35 s):</b> It went from ten minutes to under one, and the rule for every speed change was: the fix must be identical to the metre, or it doesn't ship. Captures carry a SigMF sidecar, and a file whose sample count disagrees with its wall clock is declared void rather than excused.</div>
+</section>
+
+<!-- 6 -->
+<section class="slide">
+  <div class="kicker">Take it from here</div>
+  <h2>Send me a capture. Ninety seconds of L1 is enough.</h2>
+  <ul>
+    <li><b>What's ready for others</b>: GPS + Galileo acquisition/tracking/decoding as importable modules; I/NAV and LNAV decoders with selftests; the ephemeris → ECEF solver; the TCXO calibrator.</li>
+    <li><b>GNU Radio angle</b>: the tracking loops and the nav decoders map onto blocks cleanly; the acquisition is an FFT correlator any GR flowgraph already has. Happy to co-design a gr-gpstuna with anyone who wants one.</li>
+    <li><b>Open</b>: L5/E5, real-time operation, RTK with a second receiver — and the reason I started: GNSS-disciplined timing for passive radar.</li>
+    <li><b>Ask</b>: record 90 s at 1575.42 MHz on whatever you own and send it. Different radios, different continents — that's what finds bugs.</li>
+  </ul>
+  <div class="row" style="flex:0;gap:40px;align-items:center;margin-top:10px">
+    <span class="big" style="font-size:40px">github.com/Felbs/GPSTuna</span>
+    <span class="sub">also: atsc3 (NextGen TV receiver) · Software-TV-Tuner (gr-dtv fork)</span>
+  </div>
+  <div class="foot"><span>6 / 6</span><span>E@felbs.software · felbs.software</span></div>
+  <div class="notes"><b>Say (30 s):</b> The ask is the cheapest one at this conference: record ninety seconds at L1 on whatever radio you have and send me the file. One external capture already found a day-one bug; ten would find the rest. Thanks.</div>
+</section>
+
+</div>
+<div class="pg" id="pg"></div>
+<script>
+const s=[...document.querySelectorAll('.slide')];let i=0;
+function go(n){i=Math.max(0,Math.min(s.length-1,n));s.forEach((e,k)=>e.classList.toggle('on',k===i));document.getElementById('pg').textContent=(i+1)+' / '+s.length+'   ← → navigate · n notes · p print';location.hash=i+1}
+addEventListener('keydown',e=>{if(['ArrowRight','PageDown',' '].includes(e.key))go(i+1);else if(['ArrowLeft','PageUp'].includes(e.key))go(i-1);else if(e.key==='n')document.body.classList.toggle('show-notes');else if(e.key==='p')print();else if(e.key==='Home')go(0);else if(e.key==='End')go(s.length-1)});
+addEventListener('click',e=>{if(e.target.closest('a'))return;go(e.clientX>innerWidth/2?i+1:i-1)});
+go(parseInt(location.hash.slice(1)||'1')-1);
+</script>
+</body></html>
