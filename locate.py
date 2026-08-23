@@ -15,6 +15,7 @@ private in lab_local/fix_result.json.
 """
 import argparse
 import os
+import signal
 import sys
 import time
 from pathlib import Path
@@ -105,7 +106,7 @@ def _open_sdr(antenna, fs):
     return sdr, st
 
 
-def _grab_to_file(sdr, st, secs, fs, path, max_stall_s=60):
+def _grab_to_file(sdr, st, secs, fs, path, max_stall_s=60, stop=None):
     """Stream `secs` of baseband to `path` as interleaved int16.
 
     Written to disk as it arrives rather than accumulated in memory. The
@@ -161,7 +162,7 @@ def _grab_to_file(sdr, st, secs, fs, path, max_stall_s=60):
     next_note = 60.0
     t0 = time.time()
     try:
-        while got < want:
+        while got < want and (stop is None or stop["sig"] is None):
             sr = sdr.readStream(st, [chunk], len(chunk), timeoutUs=1000000)
             n = getattr(sr, "ret", sr if isinstance(sr, int) else -1)
             if n > 0:
@@ -248,6 +249,15 @@ def capture(secs=180, antenna="Antenna A"):
               "patch antenna needs it;\n"
               "         without it expect to acquire a few birds but fail to "
               "decode their orbits.")
+    # Take the signal handlers BACK. Opening the device hands SIGINT to the
+    # SDRplay API library, which swallows it -- measured 8/23: ctrl-C and the
+    # dashboard's abort were simply ignored mid-capture. Re-registering after
+    # the open wins, and a signal becomes a clean stop through the finally
+    # block below (bias-T off, stream closed) instead of a kill that leaves
+    # DC on the coax.
+    stop = {"sig": None}
+    prev = {s: signal.signal(s, lambda sig, _f: stop.update(sig=sig))
+            for s in (signal.SIGINT, signal.SIGTERM)}
     LOCAL.mkdir(exist_ok=True)
     # One file PER capture, stamped in UTC. The fixed name meant every stop of
     # a drive overwrote the previous stop's capture -- come home from five
@@ -257,7 +267,7 @@ def capture(secs=180, antenna="Antenna A"):
     fn = LOCAL / f"sky_capture_{stamp}.cs16"
     try:
         time.sleep(0.5)
-        got = _grab_to_file(sdr, st, secs, FS, fn, max_stall_s=60)
+        got = _grab_to_file(sdr, st, secs, FS, fn, max_stall_s=60, stop=stop)
     finally:
         # Hand the coax back de-powered even if the grab throws. Otherwise the
         # next thing plugged into this port -- a passive antenna, a filter, a
@@ -269,6 +279,16 @@ def capture(secs=180, antenna="Antenna A"):
                 pass
         sdr.deactivateStream(st)
         sdr.closeStream(st)
+        for s, h in prev.items():
+            signal.signal(s, h)
+    if stop["sig"] is not None:
+        # A partial capture is junk that reads as a real stop's data; on a
+        # drive it also eats 8 MB/s of card. Delete it and say so.
+        fn.unlink(missing_ok=True)
+        print(f"[locate] capture ABORTED by signal {stop['sig']} after "
+              f"{got/FS:.0f} s -- partial file deleted, bias-T off",
+              flush=True)
+        raise SystemExit(130)
     print(f"[locate] captured {got/FS:.0f} s -> {fn} "
           f"({fn.stat().st_size/1e9:.2f} GB)", flush=True)
     left = shutil.disk_usage(LOCAL).free

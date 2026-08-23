@@ -222,9 +222,11 @@ def _run(cmd, mode, secs):
     with LOCK:
         PROC = proc
     pending = {}
+    noise = re.compile(r"RtApi|ALSA lib|snd_pcm|Jack server|^\s*$")
     for line in proc.stdout:
         line = line.rstrip("\n")
-        LOGTAIL.append(line)
+        if not noise.search(line):       # audio-driver probe spam, not ours
+            LOGTAIL.append(line)
         with LOCK:
             _parse_line(STATE, line, pending)
     rc = proc.wait()
@@ -232,7 +234,8 @@ def _run(cmd, mode, secs):
         PROC = None
         STATE["rc"] = rc
         if STATE["phase"] in ("capturing", "acquiring", "decoding", "solving"):
-            STATE["phase"] = "aborted" if rc < 0 else "error"
+            # 130 = locate.py's clean signal exit; negative = killed by signal
+            STATE["phase"] = "aborted" if (rc < 0 or rc == 130) else "error"
         _enrich_after_run(STATE, t0)
 
 
@@ -261,10 +264,24 @@ def abort_run():
         proc = PROC
     if proc is None:
         return False, "nothing running"
-    # SIGINT, not SIGKILL: capture()'s finally block must run so the bias-T
-    # is de-powered before the process dies.
-    proc.send_signal(signal.SIGINT)
-    return True, "interrupt sent"
+
+    # SIGINT first: locate.py turns it into a clean stop that de-powers the
+    # bias-T. But the SDRplay library has been seen swallowing signals
+    # (measured 8/23: an abort mid-capture was simply ignored), so escalate
+    # to SIGTERM and, as a last resort, SIGKILL rather than leave the user a
+    # dead Abort button in the car.
+    def _escalate(p):
+        for sig, grace in ((signal.SIGINT, 6), (signal.SIGTERM, 6)):
+            p.send_signal(sig)
+            try:
+                p.wait(timeout=grace)
+                return
+            except subprocess.TimeoutExpired:
+                pass
+        p.kill()
+
+    threading.Thread(target=_escalate, args=(proc,), daemon=True).start()
+    return True, "aborting..."
 
 
 # ------------------------------------------------------------------ http --
@@ -351,6 +368,11 @@ async function tick(){
    $('captext').textContent=`${s.capture.got}/${s.capture.want} s  `+
      `${s.capture.gb.toFixed(2)} GB`+
      (s.capture_file?`  → ${s.capture_file}`:'');
+ } else if(s.phase=='capturing' && s.elapsed!=null && s.secs_wanted){
+   $('capcard').hidden=false;
+   const el=Math.min(s.elapsed,s.secs_wanted);
+   $('capbar').style.width=(100*el/s.secs_wanted)+'%';
+   $('captext').textContent=`~${el.toFixed(0)}/${s.secs_wanted} s`;
  } else $('capcard').hidden=true;
  if(s.sky){ $('skycard').hidden=false;
    $('skytext').innerHTML=`SKY VIEW: <b>${s.sky.strong} strong</b> + `+
@@ -415,6 +437,11 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 st = json.loads(json.dumps(STATE))   # deep copy under lock
             st["log"] = list(LOGTAIL)[-40:]
+            if st["started_at"]:
+                # locate.py only prints capture progress once a minute; the
+                # bar between prints runs on elapsed wall time, which for a
+                # real-time capture is the same thing.
+                st["elapsed"] = round(time.time() - st["started_at"], 1)
             if st["fix"] is None and st["phase"] == "idle":
                 st["fix"] = _latest_fix_on_disk()
             return self._send(200, st)
