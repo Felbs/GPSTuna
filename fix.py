@@ -33,6 +33,23 @@ C = 299792458.0
 F_REL = -4.442807633e-10        # IS-GPS-200 relativistic clock constant
 
 
+def write_fix_result(payload):
+    """Write the fix to lab_local/fix_result.json (the latest, where every
+    reader looks) AND to a UTC-stamped copy beside it. The single fixed file
+    meant a multi-stop drive kept only the final stop's fix; the stamped
+    copies keep every stop, still inside gitignored lab_local."""
+    import json as _json
+    import time as _time
+    local = HERE / "lab_local"
+    local.mkdir(exist_ok=True)
+    text = _json.dumps(payload, indent=1)
+    (local / "fix_result.json").write_text(text)
+    stamp = _time.strftime("%Y%m%d_%H%M%SZ", _time.gmtime())
+    kept = local / f"fix_result_{stamp}.json"
+    kept.write_text(text)
+    return kept
+
+
 def decode_eph(path, fs, prn, dopp, dur, want_timing=False):
     """Full nav decode for one PRN -> ephemeris dict (mirrors relativity.main's
     union+vote harvest, standalone so it runs per satellite).
@@ -589,12 +606,12 @@ def resolve_from_cache():
     rms, lat, lon, h, offs = (res["rms"], res["lat"], res["lon"], res["h"],
                               res["offsets"])
     sane = -500 < h < 5000 and rms < 1000.0
-    (HERE / "lab_local" / "fix_result.json").write_text(_json.dumps({
+    write_fix_result({
         "valid": sane,
         "lat": lat, "lon": lon, "alt_m": h,
         "birds": [e["prn"] for e in entries],
         "resid_rms_m": rms, "ms_offsets": offs,
-        "iono_corrected": res["iono"], "el_deg": res["el_deg"]}, indent=1))
+        "iono_corrected": res["iono"], "el_deg": res["el_deg"]})
     print(f"[resolve] residual rms {rms:,.1f} m "
           f"(uncorrected {res['raw_rms']:,.1f} m), altitude "
           f"{'PLAUSIBLE' if sane else 'IMPLAUSIBLE'} ({h:,.0f} m), "
@@ -881,7 +898,7 @@ def full_fix(path, fs, det, dur, multi=1):
     if scatter > 5000.0:
         reasons.append(f"epoch scatter {scatter:,.0f} m (epochs disagree by km)")
     valid = not reasons
-    (HERE / "lab_local" / "fix_result.json").write_text(_json.dumps({
+    kept = write_fix_result({
         "valid": valid,
         "lat": lat, "lon": lon, "alt_m": h,
         "birds": sorted(int(p) for p in birds),
@@ -889,7 +906,7 @@ def full_fix(path, fs, det, dur, multi=1):
         "scatter_m": scatter, "iono_corrected": good[0]["iono"],
         "el_deg": good[0]["el_deg"],
         "ms_offsets": good[0]["offsets"],
-        "capture": str(path)}, indent=1))
+        "capture": str(path)})
     if valid:
         print(f"[fix] SOLVED with {len(birds)} birds x {len(good)} epoch(s): "
               f"mean rms {rms:,.1f} m, epoch scatter {scatter:,.1f} m, "
@@ -906,6 +923,8 @@ def full_fix(path, fs, det, dur, multi=1):
                   f"an honest rms.")
         print(f"[fix] coordinates written to lab_local/fix_result.json "
               f"(gitignored - yours alone)")
+        print(f"[fix] this stop kept as lab_local/{kept.name} -- later stops "
+              f"will not overwrite it")
         return 0
     print(f"[fix] NO FIX from {len(birds)} birds x {len(good)} epoch(s) -- "
           f"the solve converged, but not on a position:")

@@ -205,6 +205,23 @@ def _grab_to_file(sdr, st, secs, fs, path, max_stall_s=60):
 
 
 def capture(secs=180, antenna="Antenna A"):
+    # Check the disk BEFORE touching the radio. A 300 s capture is 2.46 GB;
+    # on a drive the card fills a stop at a time, and the failure you get
+    # otherwise is a short write partway through a capture you parked and
+    # waited five minutes for.
+    import shutil
+    LOCAL.mkdir(exist_ok=True)
+    need = int(secs * FS) * 4
+    free = shutil.disk_usage(LOCAL).free
+    margin = 1_000_000_000            # leave the OS a GB to breathe
+    if free < need + margin:
+        fits = max(0.0, (free - margin) / (FS * 4))
+        raise SystemExit(
+            f"\nNot enough disk for a {secs:.0f} s capture: need "
+            f"{need/1e9:.2f} GB + 1 GB margin, have {free/1e9:.2f} GB free.\n"
+            f"About {fits:.0f} s would fit. Delete old lab_local/sky_capture_*"
+            f".cs16 files\n(each fix records which capture made it) and run "
+            f"again.")
     # _open_sdr carries the friendly ImportError, so open FIRST and only then
     # import the constants -- otherwise this line raises the raw traceback.
     sdr, st = _open_sdr(antenna, FS)
@@ -232,7 +249,12 @@ def capture(secs=180, antenna="Antenna A"):
               "         without it expect to acquire a few birds but fail to "
               "decode their orbits.")
     LOCAL.mkdir(exist_ok=True)
-    fn = LOCAL / "sky_capture.cs16"
+    # One file PER capture, stamped in UTC. The fixed name meant every stop of
+    # a drive overwrote the previous stop's capture -- come home from five
+    # stops with one file. The stamp stays in gitignored lab_local, where the
+    # capture (which already encodes its own time) was going anyway.
+    stamp = time.strftime("%Y%m%d_%H%M%SZ", time.gmtime())
+    fn = LOCAL / f"sky_capture_{stamp}.cs16"
     try:
         time.sleep(0.5)
         got = _grab_to_file(sdr, st, secs, FS, fn, max_stall_s=60)
@@ -249,6 +271,10 @@ def capture(secs=180, antenna="Antenna A"):
         sdr.closeStream(st)
     print(f"[locate] captured {got/FS:.0f} s -> {fn} "
           f"({fn.stat().st_size/1e9:.2f} GB)", flush=True)
+    left = shutil.disk_usage(LOCAL).free
+    print(f"[locate] disk: {left/1e9:.1f} GB free -- about "
+          f"{int(max(0, left - 1_000_000_000) // (secs * FS * 4))} more "
+          f"capture(s) this length", flush=True)
     return str(fn)
 
 
