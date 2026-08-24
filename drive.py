@@ -73,6 +73,24 @@ def main():
     for s in (signal.SIGINT, signal.SIGTERM):
         signal.signal(s, lambda sig, _f: stop.update(why=f"signal {sig}"))
 
+    # Cap the CPU before anything else. Measured 8/23 in the backyard: the
+    # battery bank's 5 V rail collapses under full 2.7 GHz 4-core load
+    # (firmware latched under-voltage 0x50000; the Pi hard-reset twice),
+    # and at 1.5 GHz it holds 4.84 V minimum through a whole solve. A road
+    # recorder that browns out its own computer records nothing.
+    try:
+        import subprocess
+        for c in range(4):
+            subprocess.run(
+                ["sudo", "-n", "tee",
+                 f"/sys/devices/system/cpu/cpu{c}/cpufreq/scaling_max_freq"],
+                input=b"1500000", capture_output=True, timeout=5)
+        print("[drive] CPU capped at 1.5 GHz (battery brownout guard)",
+              flush=True)
+    except Exception:                                            # noqa: BLE001
+        print("[drive] WARNING: could not cap CPU frequency -- on battery "
+              "the 5 V rail may sag", flush=True)
+
     STOP_FILE.unlink(missing_ok=True)          # a stale STOP is not an order
     t0 = time.time()
     deadline = t0 + a.max_hours * 3600 if a.max_hours else None
