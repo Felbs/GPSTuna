@@ -680,7 +680,7 @@ def _decode_all(jobs):
     fallback if the pool cannot start -- a locked-down interpreter, a
     frozen build -- so a pool problem can never cost the fix)."""
     import os as _os
-    from measure import _pool_allowed, pool_timeout
+    from measure import _pool_allowed, pool_silence, drain
     n_workers = min(len(jobs), max(1, (_os.cpu_count() or 1)))
     if n_workers > 1 and _pool_allowed():
         try:
@@ -697,10 +697,10 @@ def _decode_all(jobs):
             with ctx.Pool(n_workers) as pool:
                 # serial cost ~ 1.5 s per second of capture per bird on a
                 # slow core; the pool must beat that by a lot or it is dead
-                dur = max(float(j[4]) for j in jobs)
-                est = 1.5 * min(dur, 120.0) * len(jobs)
-                res = pool.map_async(_decode_one, jobs)
-                return res.get(timeout=pool_timeout(est))
+                # one bird's decode is ~1-2 min on a Pi; results then
+                # arrive steadily. 5 min of silence is a dead pool.
+                ars = [pool.apply_async(_decode_one, (j,)) for j in jobs]
+                return drain(ars, pool_silence(300))
         except Exception as e:                               # noqa: BLE001
             print(f"  (process pool unavailable: {type(e).__name__}: {e}; "
                   f"decoding serially)")

@@ -169,6 +169,34 @@ def pool_timeout(serial_estimate_s):
     return max(300.0, 10.0 * float(serial_estimate_s))
 
 
+def pool_silence(default_s):
+    """How long a pool may go without delivering ANY result before it is
+    declared dead. The total-job timeout above scales with the serial
+    estimate and reached 61 MINUTES on a Pi 5 (measured 8/24, war-drive
+    capture 4: one worker went quiet, the other three sat idle, the parent
+    waited the hour out). Healthy workers hand back a result every few
+    seconds, so silence -- not elapsed time -- is the honest signal.
+    GPSTUNA_POOL_SILENCE overrides (seconds)."""
+    import os as _os
+    try:
+        return float(_os.environ.get("GPSTUNA_POOL_SILENCE", default_s))
+    except ValueError:
+        return float(default_s)
+
+
+def drain(async_results, silence_s):
+    """Collect apply_async results in order, giving up if any single one
+    takes longer than silence_s. Raises multiprocessing.TimeoutError.
+    (AsyncResult.get(timeout) is the one pool API guaranteed to exist:
+    Pool.imap hands back a bare generator on this interpreter -- measured
+    8/24, it made every capture fall back to serial.)"""
+    return [r.get(timeout=silence_s) for r in async_results]
+
+
+def _acq_tasks(fds):
+    return [_acq_task(fd) for fd in fds]
+
+
 def _acquire_rows_parallel(blocks, fs, prns, dopplers):
     """Doppler-parallel _acquire_rows. Returns rows in dopplers order, or
     None if a pool cannot be started (caller falls back to serial)."""
@@ -188,10 +216,13 @@ def _acquire_rows_parallel(blocks, fs, prns, dopplers):
         with ctx.Pool(n_workers, initializer=_acq_init,
                       initargs=(np.ascontiguousarray(blocks), fs, prns)) as pool:
             # serial cost ~ 0.5 ms per (PRN, Doppler, block) on a slow core
-            est = 0.5e-3 * len(prns) * len(dopplers) * blocks.shape[0]
-            res = pool.map_async(_acq_task, list(dopplers),
-                                 chunksize=max(1, len(dopplers) // (3 * n_workers)))
-            return res.get(timeout=pool_timeout(est))
+            fds = list(dopplers)
+            cs = max(1, len(fds) // (3 * n_workers))
+            chunks = [fds[i:i + cs] for i in range(0, len(fds), cs)]
+            ars = [pool.apply_async(_acq_tasks, (c,)) for c in chunks]
+            # ~30 s of work per worker on a Pi; 2 min of silence is dead
+            return [row for rows in drain(ars, pool_silence(120))
+                    for row in rows]
     except Exception as e:                                   # noqa: BLE001
         print(f"  (acquisition pool unavailable: {type(e).__name__}: {e}; "
               f"searching serially)")
