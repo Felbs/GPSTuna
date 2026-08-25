@@ -697,10 +697,12 @@ def _decode_all(jobs):
             with ctx.Pool(n_workers) as pool:
                 # serial cost ~ 1.5 s per second of capture per bird on a
                 # slow core; the pool must beat that by a lot or it is dead
-                # one bird's decode is ~1-2 min on a Pi; results then
-                # arrive steadily. 5 min of silence is a dead pool.
+                # one bird's decode is ~1-2 min on an idle Pi, longer on a
+                # busy one (5 min was tripped by a healthy pool, 8/24). A
+                # dead worker is caught in half a second by drain(); the
+                # silence limit only backstops a pool that is truly stuck.
                 ars = [pool.apply_async(_decode_one, (j,)) for j in jobs]
-                return drain(ars, pool_silence(300))
+                return drain(ars, pool_silence(900), pool)
         except Exception as e:                               # noqa: BLE001
             print(f"  (process pool unavailable: {type(e).__name__}: {e}; "
                   f"decoding serially)")

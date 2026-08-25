@@ -184,13 +184,52 @@ def pool_silence(default_s):
         return float(default_s)
 
 
-def drain(async_results, silence_s):
-    """Collect apply_async results in order, giving up if any single one
-    takes longer than silence_s. Raises multiprocessing.TimeoutError.
-    (AsyncResult.get(timeout) is the one pool API guaranteed to exist:
-    Pool.imap hands back a bare generator on this interpreter -- measured
-    8/24, it made every capture fall back to serial.)"""
-    return [r.get(timeout=silence_s) for r in async_results]
+def drain(async_results, silence_s, pool=None):
+    """Collect apply_async results in order. Two ways to give up, both
+    measured 8/24 on the Pi 5 war-drive batch:
+
+    * a worker DIED (when `pool` is given): multiprocessing replaces it
+      silently and the task it was holding is never re-queued -- capture 4
+      sat 33 min at 0 % CPU on exactly that. The worker set is checked every
+      half second; a replaced or exited worker raises at once, naming the
+      pid and exit code (negative = the signal that killed it).
+    * SILENCE: no result from ANY task for silence_s, counted from the last
+      arrival. The first version timed each result alone and in order, so
+      the first one carried a whole bird's decode: on a loaded Pi a HEALTHY
+      5-bird pool tripped the 300 s (capture 6), was torn down, and the
+      birds were decoded again serially. With death detection carrying the
+      fast case, silence is only the backstop and can afford to be generous.
+
+    Raises RuntimeError (death) or multiprocessing.TimeoutError (silence).
+    (AsyncResult.get is the one pool API guaranteed to exist: Pool.imap
+    hands back a bare generator on this interpreter.)"""
+    import time as _time
+    from multiprocessing import TimeoutError as _Timeout
+    results = list(async_results)
+    workers = list(getattr(pool, "_pool", None) or []) if pool is not None else []
+    pids0 = {p.pid for p in workers}
+    last, n_seen = _time.monotonic(), 0
+    out = []
+    for r in results:
+        while not r.ready():
+            r.wait(0.5)
+            now = _time.monotonic()
+            n_ready = sum(1 for x in results if x.ready())
+            if n_ready > n_seen:
+                last, n_seen = now, n_ready
+            if pool is not None:
+                cur = list(getattr(pool, "_pool", None) or [])
+                if ({p.pid for p in cur} != pids0
+                        or any(p.exitcode is not None for p in cur)):
+                    dead = [(p.pid, p.exitcode) for p in workers + cur
+                            if p.exitcode is not None]
+                    raise RuntimeError("pool worker died and was replaced "
+                                       f"(pid, exit code): {dead or 'unknown'}")
+            if now - last > silence_s:
+                raise _Timeout(f"no result for {silence_s:.0f} s "
+                               f"({n_seen}/{len(results)} done)")
+        out.append(r.get())
+    return out
 
 
 def _acq_tasks(fds):
@@ -221,7 +260,7 @@ def _acquire_rows_parallel(blocks, fs, prns, dopplers):
             chunks = [fds[i:i + cs] for i in range(0, len(fds), cs)]
             ars = [pool.apply_async(_acq_tasks, (c,)) for c in chunks]
             # ~30 s of work per worker on a Pi; 2 min of silence is dead
-            return [row for rows in drain(ars, pool_silence(120))
+            return [row for rows in drain(ars, pool_silence(120), pool)
                     for row in rows]
     except Exception as e:                                   # noqa: BLE001
         print(f"  (acquisition pool unavailable: {type(e).__name__}: {e}; "
