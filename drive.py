@@ -31,6 +31,7 @@ sys.path.insert(0, str(HERE))
 from locate import FS, LOCAL, capture          # noqa: E402
 
 STOP_FILE = LOCAL / "STOP"
+MISSION = LOCAL / "MISSION"
 LOG = LOCAL / "drive_log.jsonl"
 
 
@@ -59,6 +60,10 @@ def main():
                          "none: back-to-back)")
     ap.add_argument("--no-check", action="store_true",
                     help="skip the acquisition check between captures")
+    ap.add_argument("--until", type=float, default=None,
+                    help="absolute unix time to stop at; overrides "
+                         "--max-hours. Set by the reboot-resume path so a "
+                         "restarted mission keeps its original end time")
     a = ap.parse_args()
 
     try:
@@ -93,7 +98,26 @@ def main():
 
     STOP_FILE.unlink(missing_ok=True)          # a stale STOP is not an order
     t0 = time.time()
-    deadline = t0 + a.max_hours * 3600 if a.max_hours else None
+    deadline = (a.until if a.until
+                else t0 + a.max_hours * 3600 if a.max_hours else None)
+
+    # The mission marker: proof to the next boot that a drive was in
+    # progress. On the road there is no screen and no network, so a
+    # brownout reboot would otherwise end the recording in silence and the
+    # first anyone knows is an empty log at the destination. crontab's
+    # @reboot hook reads this file and relaunches with the SAME end time.
+    # Written before the first capture and deleted on every clean stop, so
+    # its mere existence after a boot means "you were interrupted".
+    relaunch = [sys.executable, str(HERE / "drive.py"),
+                "--secs", f"{a.secs:g}", "--antenna", a.antenna]
+    if a.every:
+        relaunch += ["--every", f"{a.every:g}"]
+    if a.no_check:
+        relaunch += ["--no-check"]
+    if deadline:
+        relaunch += ["--until", f"{deadline:.0f}"]
+    MISSION.write_text(json.dumps(
+        {"started": t0, "deadline": deadline, "argv": relaunch}) + "\n")
     per_cycle_gb = a.secs * FS * 4 / 1e9
     print(f"[drive] road recorder: {a.secs:.0f} s captures "
           f"({per_cycle_gb:.2f} GB each)"
@@ -113,9 +137,14 @@ def main():
         try:
             path = capture(a.secs, a.antenna)
         except SystemExit as e:
-            # the disk guard's refusal, or a signal mid-capture (code 130)
+            # capture() exits with a message, not a code: the disk guard's
+            # refusal, "found no radio", a stream that never started. Pass
+            # it through verbatim -- guessing "disk guard" for all of them
+            # is how a knocked-out antenna cable reads as a full card, and
+            # this log is the only witness the drive has.
             stop["why"] = ("aborted mid-capture" if e.code == 130
-                           else f"capture refused: disk guard")
+                           else " ".join(str(e.code).split()))
+            n -= 1                     # it was counted before it was taken
             break
         entry = {"t_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                  "cycle": n,
@@ -144,6 +173,7 @@ def main():
                 time.sleep(1)
 
     STOP_FILE.unlink(missing_ok=True)
+    MISSION.unlink(missing_ok=True)            # a clean stop is not a crash
     hrs = (time.time() - t0) / 3600
     print(f"[drive] stopped ({stop['why'] or 'done'}): {n} capture(s) in "
           f"{hrs:.2f} h. Solve at home with\n"
