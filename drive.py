@@ -48,6 +48,23 @@ def sky_check(path):
     return strong
 
 
+def hold_load(until, should_stop):
+    """Wait out a pacing gap WITHOUT going idle. Drive #2 (8/28) died in
+    the first --every gap, 2 min in: radio closed, bias-T off, CPU asleep,
+    and the USB bank saw a load small enough to call 'charged' and shut
+    off. Back-to-back recording on the same bank had survived 33 min the
+    week before. So the gap keeps one core doing FFTs -- about a watt --
+    which is enough draw to look like a computer, not a phone that has
+    finished charging."""
+    import numpy as np
+    while time.time() < until and not should_stop():
+        x = np.random.standard_normal(1 << 16).astype(np.complex64)
+        for _ in range(50):
+            x = np.fft.fft(x) / 256.0        # keep magnitudes bounded
+            if time.time() >= until:
+                break
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--secs", type=float, default=90,
@@ -167,10 +184,8 @@ def main():
         with LOG.open("a") as fh:
             fh.write(json.dumps(entry) + "\n")
         if a.every and stop["why"] is None:
-            end = time.time() + a.every
-            while time.time() < end and stop["why"] is None \
-                    and not STOP_FILE.exists():
-                time.sleep(1)
+            hold_load(time.time() + a.every,
+                      lambda: stop["why"] is not None or STOP_FILE.exists())
 
     STOP_FILE.unlink(missing_ok=True)
     MISSION.unlink(missing_ok=True)            # a clean stop is not a crash
