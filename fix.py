@@ -866,7 +866,15 @@ def full_fix(path, fs, det, dur, multi=1):
                                           else v)
                                       for k, v in e["eph"].items()
                                       if k != "tows"}})
-        res = solve_final(entries)
+        try:
+            res = solve_final(entries)
+        except (np.linalg.LinAlgError, ValueError, FloatingPointError) as e:
+            # One bad epoch (a NaN pseudorange from a snapshot acquire that
+            # found nothing) used to take the whole solve down with "SVD did
+            # not converge" (drive #3, 8/29 23:58Z capture). Skip it; the
+            # other 14 epochs are the fix.
+            print(f"  T={T_RX:5.1f}s: epoch skipped ({e})")
+            continue
         results.append(res)
         print(f"  T={T_RX:5.1f}s: rms {res['rms']:,.1f} m, "
               f"alt {res['h']:,.0f} m"
@@ -875,6 +883,9 @@ def full_fix(path, fs, det, dur, multi=1):
     (HERE / "lab_local").mkdir(exist_ok=True)
     (HERE / "lab_local" / "prs_cache.json").write_text(_json2.dumps(cache))
     # 4. average the sane epochs in ECEF; scatter = honest repeatability
+    if not results:
+        print("[fix] every epoch failed to solve - no fix")
+        return 1
     good = [r for r in results if -500 < r["h"] < 5000]
     if not good:
         # nothing sane to average: fall back to everything ONLY so the
