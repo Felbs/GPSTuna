@@ -12,7 +12,14 @@ showed them.
 
   python3 drive.py                     # 90 s captures until the disk is full
   python3 drive.py --secs 120 --max-hours 2
+  python3 drive.py --secs 45           # half the road per capture, fewer birds
   python3 drive.py --no-check          # trust the antenna, record more
+
+Capture length is the road-smear lever: at 50 mph a 90 s capture covers
+2.0 km, and every epoch inside it is somewhere else. fix.py fits a track
+through the epochs so that stretch becomes a trace rather than an error --
+which is the cheaper fix, because shortening the capture also costs
+satellites (a complete ephemeris needs subframes 1-3 to arrive clean).
 
 Start it BEFORE leaving (while still on wifi); stop it from the driveway on
 return, or just let it finish. Every cycle appends one line to
@@ -29,6 +36,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from locate import FS, LOCAL, capture          # noqa: E402
+
+EPH_SECS = 45.0          # below this, complete ephemerides start going missing
 
 STOP_FILE = LOCAL / "STOP"
 MISSION = LOCAL / "MISSION"
@@ -140,6 +149,25 @@ def main():
           f"({per_cycle_gb:.2f} GB each)"
           + (f", stopping after {a.max_hours:g} h" if a.max_hours else
              ", until the disk guard says stop"), flush=True)
+    # What a capture length COSTS, both ways, so the choice is made before
+    # the drive rather than discovered in the numbers afterwards.
+    print("[drive] at speed one capture is a stretch of road, not a point: "
+          + ", ".join(f"{mph:.0f} mph = {a.secs * mph * 0.44704 / 1000:.1f} km"
+                      for mph in (30, 50, 70))
+          + f" per {a.secs:.0f} s capture", flush=True)
+    if a.secs < EPH_SECS:
+        # Drive #3 (8/29): 3 of 28 ninety-second captures could not complete
+        # four ephemerides ("only 3 birds fully decoded - need 4"); the
+        # solver's own advice on those was "a longer capture (300 s) usually
+        # gets the remaining subframes". Shorter trades birds for smear, and
+        # a capture with three birds is worth nothing at any smear.
+        print(f"[drive] WARNING: {a.secs:.0f} s is below {EPH_SECS:.0f} s -- "
+              f"a full ephemeris needs subframes 1-3 (18 s) to arrive "
+              f"parity-clean, and 3 of 28 captures on the 8/29 drive missed "
+              f"a 4th bird even at 90 s. fix.py now fits a track through the "
+              f"epochs, which removes the smear WITHOUT costing birds; "
+              f"shorten the capture only if you would rather have more, "
+              f"shorter stretches of road.", flush=True)
 
     n = 0
     while stop["why"] is None:
@@ -166,6 +194,7 @@ def main():
         entry = {"t_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                  "cycle": n,
                  "file": Path(path).name,
+                 "secs": a.secs,
                  "gb": round(Path(path).stat().st_size / 1e9, 3)}
         if not a.no_check:
             try:
