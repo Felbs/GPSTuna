@@ -40,6 +40,9 @@ def capture_stamp(path):
 
 def load_fixes(drive):
     """Latest valid stamped fix per capture, in capture order."""
+    # A drive that crosses 00:00 UTC has captures under two dates, so
+    # --drive takes a comma list: 20260829,20260830.
+    drives = set(drive.split(",")) if drive else None
     by_capture = {}
     for f in sorted(glob.glob(str(LOCAL / "fix_result_*Z.json"))):
         try:
@@ -49,7 +52,7 @@ def load_fixes(drive):
         if not d.get("valid") or "lat" not in d or "lon" not in d:
             continue
         st = capture_stamp(d.get("capture", ""))
-        if st is None or (drive and st[0] != drive):
+        if st is None or (drives and st[0] not in drives):
             continue
         d["_stamp"] = st
         d["_solved"] = os.path.basename(f)
@@ -179,13 +182,15 @@ if (pts.length) map.fitBounds(L.latLngBounds(pts).pad(0.25)); else map.setView([
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--drive", help="YYYYMMDD of the captures to draw (default: all)")
+    ap.add_argument("--drive", help="YYYYMMDD of the captures to draw, comma "
+                    "list for a drive that crosses midnight UTC (default: all)")
     ap.add_argument("--out", help="output HTML (relative paths land in lab_local/)")
     a = ap.parse_args()
     fixes = load_fixes(a.drive)
     if not fixes:
         sys.exit("no stamped fix results in lab_local/ match -- run locate.py first")
-    out = Path(a.out) if a.out else Path(f"drive_map_{a.drive or 'all'}.html")
+    tag = (a.drive or "all").replace(",", "-")
+    out = Path(a.out) if a.out else Path(f"drive_map_{tag}.html")
     if not out.is_absolute():
         out = LOCAL / out
     title = f"GPSTuna war drive {a.drive}" if a.drive else "GPSTuna fixes"
