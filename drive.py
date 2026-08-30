@@ -12,19 +12,15 @@ showed them.
 
   python3 drive.py                     # 90 s captures until the disk is full
   python3 drive.py --secs 120 --max-hours 2
-  python3 drive.py --secs 45           # half the road per capture, fewer birds
+  python3 drive.py --secs 45 --first-secs 120   # bank orbits, then go short
   python3 drive.py --no-check          # trust the antenna, record more
 
 Capture length is the road-smear lever: at 50 mph a 90 s capture covers
 2.0 km, and every epoch inside it is somewhere else. fix.py fits a track
-through the epochs so that stretch becomes a trace rather than an error --
-which is the cheaper fix, because shortening the capture also costs
-satellites (a complete ephemeris needs subframes 1-3 to arrive clean).
-
-Start it BEFORE leaving (while still on wifi); stop it from the driveway on
-return, or just let it finish. Every cycle appends one line to
-lab_local/drive_log.jsonl -- PRN counts and file sizes only, never
-coordinates, so the log is safe to read anywhere.
+through the epochs so the stretch is a trace rather than an error, and it
+pools every orbit it decodes so a SHORT capture can borrow them from the
+capture before -- it only has to acquire each bird and catch one clean
+subframe for its clock. Make the first capture long; the rest can be short.
 """
 import argparse
 import json
@@ -81,6 +77,10 @@ def main():
     ap.add_argument("--antenna", default="Antenna B")
     ap.add_argument("--max-hours", type=float, default=None,
                     help="stop cleanly after this long, for a known drive")
+    ap.add_argument("--first-secs", type=float, default=0,
+                    help="length of the FIRST capture only: a long one banks "
+                         "every orbit in view so short captures after it can "
+                         "borrow them (default: same as --secs)")
     ap.add_argument("--every", type=float, default=0,
                     help="extra seconds to wait between cycles (default "
                          "none: back-to-back)")
@@ -156,18 +156,21 @@ def main():
                       for mph in (30, 50, 70))
           + f" per {a.secs:.0f} s capture", flush=True)
     if a.secs < EPH_SECS:
-        # Drive #3 (8/29): 3 of 28 ninety-second captures could not complete
-        # four ephemerides ("only 3 birds fully decoded - need 4"); the
-        # solver's own advice on those was "a longer capture (300 s) usually
-        # gets the remaining subframes". Shorter trades birds for smear, and
-        # a capture with three birds is worth nothing at any smear.
-        print(f"[drive] WARNING: {a.secs:.0f} s is below {EPH_SECS:.0f} s -- "
-              f"a full ephemeris needs subframes 1-3 (18 s) to arrive "
-              f"parity-clean, and 3 of 28 captures on the 8/29 drive missed "
-              f"a 4th bird even at 90 s. fix.py now fits a track through the "
-              f"epochs, which removes the smear WITHOUT costing birds; "
-              f"shorten the capture only if you would rather have more, "
-              f"shorter stretches of road.", flush=True)
+        # A complete orbit needs subframes 1-3 (18 s of a 30 s frame) to
+        # arrive parity-clean, and 3 of 28 ninety-second captures on the
+        # 8/29 drive still missed a 4th bird. That is no longer fatal:
+        # fix.py pools every orbit it decodes (lab_local/eph_pool.json,
+        # good for 2 h) and a short capture borrows them, needing only to
+        # ACQUIRE each bird and catch ONE clean subframe for its clock. So
+        # the first capture of a drive should be a long one that banks the
+        # sky; the rest can be short.
+        print(f"[drive] {a.secs:.0f} s captures are shorter than a full "
+              f"ephemeris ({EPH_SECS:.0f} s) - fine AFTER the first capture "
+              f"has banked the orbits (fix.py's pool), thin before it. "
+              f"Solve the captures in order.", flush=True)
+        if a.first_secs <= a.secs:
+            print(f"[drive] tip: --first-secs 120 makes the opening capture "
+                  f"long enough to decode every orbit in view", flush=True)
 
     n = 0
     while stop["why"] is None:
@@ -179,8 +182,9 @@ def main():
             break
         n += 1
         cyc_t0 = time.time()
+        secs = a.first_secs if (n == 1 and a.first_secs > a.secs) else a.secs
         try:
-            path = capture(a.secs, a.antenna)
+            path = capture(secs, a.antenna)
         except SystemExit as e:
             # capture() exits with a message, not a code: the disk guard's
             # refusal, "found no radio", a stream that never started. Pass
@@ -194,7 +198,7 @@ def main():
         entry = {"t_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                  "cycle": n,
                  "file": Path(path).name,
-                 "secs": a.secs,
+                 "secs": secs,
                  "gb": round(Path(path).stat().st_size / 1e9, 3)}
         if not a.no_check:
             try:

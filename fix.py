@@ -37,6 +37,76 @@ SPEED_MAX = 60.0                # m/s (134 mph): faster is a solve, not a car
 MOVING_MPS = 3.5                # ~8 mph: above this, call the epochs a track
 
 
+EPH_NEED = {"sqrtA", "e", "M0", "toe", "omega", "i0", "Omega0", "af0"}
+EPH_VALID_S = 7200.0            # +-2 h of toe: the broadcast's own fit interval
+
+
+def capture_time(path):
+    """UTC of a capture, as unix seconds. drive.py names its files
+    sky_capture_YYYYMMDD_HHMMSSZ.cs16, which is the only timestamp that
+    survives copying the card; the file's mtime is the fallback."""
+    import calendar
+    import re as _re
+    import time as _t
+    m = _re.search(r"_(\d{8})_(\d{6})Z", os.path.basename(str(path)))
+    if m:
+        return float(calendar.timegm(
+            _t.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S")))
+    try:
+        return float(Path(path).stat().st_mtime)
+    except OSError:
+        return float(_t.time())
+
+
+def _pool_file():
+    return HERE / "lab_local" / "eph_pool.json"
+
+
+def load_eph_pool():
+    """Orbits harvested from earlier captures. A satellite's ephemeris is
+    the same broadcast for every receiver for ~2 hours, so a capture too
+    short to decode subframes 1-3 cleanly does not need to: it needs to
+    ACQUIRE the bird and catch one parity-clean subframe for its clock.
+    That is what makes a short capture affordable -- 3 of 28 captures on
+    the 8/29 drive were thrown away for want of a 4th orbit that the
+    capture two minutes earlier had already decoded."""
+    import json as _json
+    try:
+        return _json.loads(_pool_file().read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def pool_put(pool, eph, tow_now, cap_t):
+    pool[str(int(eph["prn"]))] = {
+        "eph": {k: (float(v) if isinstance(v, (int, float)) else v)
+                for k, v in eph.items() if k != "tows"},
+        "toe": float(eph["toe"]), "tow_seen": float(tow_now),
+        "capture_utc": float(cap_t)}
+
+
+def pool_get(pool, prn, tow_now, cap_t):
+    """A pooled orbit, or (None, why-not). Two independent clocks must both
+    agree it is fresh: seconds-of-week wraps every 7 days, so a week-old
+    entry can alias to 'ten minutes ago' on toe alone."""
+    e = pool.get(str(int(prn)))
+    if not e:
+        return None, "no pooled orbit"
+    age = abs(float(cap_t) - float(e.get("capture_utc", 0.0)))
+    if age > EPH_VALID_S:
+        return None, f"pooled orbit is {age/3600:.1f} h old"
+    dt = (float(tow_now) - float(e["toe"]) + 302400.0) % 604800.0 - 302400.0
+    if abs(dt) > EPH_VALID_S:
+        return None, f"pooled toe is {dt/60:+.0f} min away"
+    return e["eph"], dt
+
+
+def save_eph_pool(pool):
+    import json as _json
+    (HERE / "lab_local").mkdir(exist_ok=True)
+    _pool_file().write_text(_json.dumps(pool, indent=1))
+
+
 def write_fix_result(payload):
     """Write the fix to lab_local/fix_result.json (the latest, where every
     reader looks) AND to a UTC-stamped copy beside it. The single fixed file
@@ -652,6 +722,9 @@ def main():
     ap.add_argument("--validate", action="store_true")
     ap.add_argument("--resolve", action="store_true",
                     help="re-run assembly+solve from lab_local cache")
+    ap.add_argument("--no-eph-pool", action="store_true",
+                    help="do not reuse orbits decoded from nearby captures "
+                         "(lab_local/eph_pool.json), and do not add to them")
     ap.add_argument("--multi", type=int,
                     default=int(os.environ.get("GPSTUNA_EPOCHS", "15")),
                     help="solve at N snapshot epochs (default 15, or "
@@ -684,7 +757,8 @@ def main():
         return validate()
     # (4+ birds path) decode, pseudoranges from code phase + TOW, solve
     print("[fix] 4+ birds - decoding ephemerides + solving (fix -> lab_local/ only)")
-    return full_fix(a.iq, fs, det, dur, multi=a.multi)
+    return full_fix(a.iq, fs, det, dur, multi=a.multi,
+                    use_pool=not a.no_eph_pool)
 
 
 def _decode_one(job):
@@ -737,7 +811,7 @@ def _decode_all(jobs):
     return [_decode_one(j) for j in jobs]
 
 
-def full_fix(path, fs, det, dur, multi=1):
+def full_fix(path, fs, det, dur, multi=1, use_pool=True):
     """The final stage: coarse-time from each bird's nav-bit grid
     (millisecond-accurate subframe clocks) + sub-millisecond from a
     common-epoch acquisition snapshot -> pseudoranges -> solve().
@@ -749,6 +823,9 @@ def full_fix(path, fs, det, dur, multi=1):
     # the birds and the box (a Pi with 4 cores gets 4-wide, this desktop 7).
     # Each worker returns its own log so the output stays ordered by PRN.
     birds = {}
+    borrowed, pool_dirty = [], []
+    cap_t = capture_time(path)
+    pool = load_eph_pool() if use_pool else None
     jobs = [(path, fs, prn, r["dopp"], dur) for prn, r in det.items()]
     results = _decode_all(jobs)
     for (prn, eph, tim, err, log_txt) in results:
@@ -757,15 +834,34 @@ def full_fix(path, fs, det, dur, multi=1):
         if err:
             print(f"  PRN{prn}: decode failed ({err})")
             continue
-        need = {"sqrtA", "e", "M0", "toe", "omega", "i0", "Omega0", "af0"}
-        missing = need - set(eph)
-        if missing:
-            print(f"  PRN{prn}: ephemeris incomplete (missing {sorted(missing)})")
-            continue
+        missing = EPH_NEED - set(eph)
         if not tim["anchors"]:
             print(f"  PRN{prn}: no parity-clean subframe anchor")
             continue
+        tow_now = min(tw for _i, _sf, tw in tim["anchors"]) * 6.0 - 6.0
+        if missing:
+            # The orbit is the same broadcast for hours; the CLOCK is not.
+            # A bird with a clean subframe anchor but an incomplete orbit
+            # can borrow the orbit from a nearby capture and still bring
+            # its own timing -- which is what a short capture cannot decode
+            # and does not have to.
+            pooled, why = (pool_get(pool, prn, tow_now, cap_t) if pool is not None
+                           else (None, "pool disabled"))
+            if pooled is not None:
+                birds[prn] = (pooled, tim)
+                borrowed.append(int(prn))
+                print(f"  PRN{prn}: ephemeris incomplete (missing "
+                      f"{sorted(missing)}) - BORROWED the orbit decoded "
+                      f"{abs(why)/60:.0f} min from its toe earlier in this "
+                      f"drive; timing is this capture's own")
+                continue
+            print(f"  PRN{prn}: ephemeris incomplete (missing "
+                  f"{sorted(missing)}) - {why}")
+            continue
         birds[prn] = (eph, tim)
+        if pool is not None:
+            pool_put(pool, eph, tow_now, cap_t)
+            pool_dirty.append(prn)
         print(f"  PRN{prn}: ephemeris COMPLETE, {len(tim['anchors'])} anchors, "
               f"C/N0 {tim['tr']['cn0']:.0f} dB-Hz")
     # toe consensus gate: ephemeris reference times normally sit on the
@@ -792,8 +888,21 @@ def full_fix(path, fs, det, dur, multi=1):
                   f"{len(on_grid)} siblings are on it - DROPPED "
                   f"(suspected voted-in bit error, {n_clean} clean copies)")
             del birds[prn]
+    if pool is not None and pool_dirty:
+        # Bank the orbits BEFORE the bird-count check: a capture that cannot
+        # solve on its own still decoded real ephemerides, and the next one
+        # along the road should get them.
+        save_eph_pool(pool)
+        print(f"[fix] {len(pool_dirty)} orbit(s) banked in "
+              f"lab_local/eph_pool.json for the next capture")
     if len(birds) < 4:
-        print(f"[fix] only {len(birds)} birds fully decoded - need 4")
+        print(f"[fix] only {len(birds)} birds fully decoded - need 4"
+              + (f" (the orbit pool supplied {len(borrowed)} of them; "
+                 f"the rest never acquired or brought no clean subframe)"
+                 if borrowed else
+                 ""
+                 if pool is None else
+                 " - no pooled orbit was fresh enough to lend"))
         return 1
 
     # 2. coarse SV clock, SELF-CALIBRATED, once per bird: every parity-clean
@@ -989,6 +1098,7 @@ def full_fix(path, fs, det, dur, multi=1):
         "scatter_about_track_m": scatter_track,
         "speed_mps": speed,
         "t_rx_ref_s": round(float(T.mean()), 2) if len(good) else None,
+        "eph_borrowed": sorted(borrowed),
         "track": track,
         "iono_corrected": good[0]["iono"],
         "el_deg": good[0]["el_deg"],
@@ -998,6 +1108,12 @@ def full_fix(path, fs, det, dur, multi=1):
         print(f"[fix] SOLVED with {len(birds)} birds x {len(good)} epoch(s): "
               f"mean rms {rms:,.1f} m, epoch scatter {scatter:,.1f} m, "
               f"altitude PLAUSIBLE ({h:,.0f} m)")
+        if borrowed:
+            print(f"[fix] {len(borrowed)} of {len(birds)} orbits came from "
+                  f"the pool (PRN {', '.join(str(b) for b in sorted(borrowed))}"
+                  f") - decoded from a capture less than "
+                  f"{EPH_VALID_S/3600:.0f} h away and still inside their "
+                  f"fit interval. Timing came from THIS capture.")
         if speed is not None and speed > MOVING_MPS:
             span = speed * (float(T.max() - T.min()))
             print(f"[fix] the receiver was MOVING at {speed:,.1f} m/s "
