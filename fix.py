@@ -15,6 +15,7 @@ printed to any shared log. The code is public; the coordinates never are.
   python fix.py --validate                               # sat-position sanity
 """
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -31,6 +32,9 @@ MU = 3.986005e14
 OMEGA_E = 7.2921151467e-5
 C = 299792458.0
 F_REL = -4.442807633e-10        # IS-GPS-200 relativistic clock constant
+MIN_EPOCHS = 3                  # below this the epoch scatter is not a measurement
+SPEED_MAX = 60.0                # m/s (134 mph): faster is a solve, not a car
+MOVING_MPS = 3.5                # ~8 mph: above this, call the epochs a track
 
 
 def write_fix_result(payload):
@@ -446,6 +450,23 @@ def elevation_weight(el_rad):
     return 1.0 / (a * a + (b * b) / (s * s))
 
 
+def motion_fit(P, T):
+    """Fit a constant-velocity track through per-epoch ECEF positions.
+
+    Returns (speed_mps, scatter_about_track_m), or (None, None) when there
+    are too few epochs to say anything. The residual about the fitted line
+    is the accuracy figure for a receiver that was moving; the spread about
+    the MEAN is not, because most of it is the vehicle."""
+    P = np.asarray(P, float)
+    T = np.asarray(T, float)
+    if len(T) < MIN_EPOCHS or float(T.std()) <= 1e-6:
+        return None, None
+    A = np.vstack([T - T.mean(), np.ones(len(T))]).T
+    coef = np.linalg.lstsq(A, P, rcond=None)[0]          # rows: [velocity, p0]
+    speed = float(np.linalg.norm(coef[0]))               # m/s in ECEF
+    return speed, float(np.linalg.norm((P - A @ coef).std(axis=0)))
+
+
 def solve_final(entries):
     """solve_snapshot + atmospheric refinement. Troposphere always; the
     Klobuchar ionosphere correction only when some bird's decode caught the
@@ -611,6 +632,7 @@ def resolve_from_cache():
         "lat": lat, "lon": lon, "alt_m": h,
         "birds": [e["prn"] for e in entries],
         "resid_rms_m": rms, "ms_offsets": offs,
+        "epochs_used": 1, "scatter_m": None,
         "iono_corrected": res["iono"], "el_deg": res["el_deg"]})
     print(f"[resolve] residual rms {rms:,.1f} m "
           f"(uncorrected {res['raw_rms']:,.1f} m), altitude "
@@ -630,8 +652,14 @@ def main():
     ap.add_argument("--validate", action="store_true")
     ap.add_argument("--resolve", action="store_true",
                     help="re-run assembly+solve from lab_local cache")
-    ap.add_argument("--multi", type=int, default=1,
-                    help="solve at N snapshot epochs and average (shrinks noise)")
+    ap.add_argument("--multi", type=int,
+                    default=int(os.environ.get("GPSTUNA_EPOCHS", "15")),
+                    help="solve at N snapshot epochs (default 15, or "
+                         "$GPSTUNA_EPOCHS). This used to default to 1, which "
+                         "locate.py never did -- and a one-epoch solve is now "
+                         f"refused outright, because its scatter is zero by "
+                         "construction. Same invariant, same consequence, "
+                         "both entry points.")
     a = ap.parse_args()
     if a.validate:
         return validate(a.iq)
@@ -875,6 +903,7 @@ def full_fix(path, fs, det, dur, multi=1):
             # other 14 epochs are the fix.
             print(f"  T={T_RX:5.1f}s: epoch skipped ({e})")
             continue
+        res["t_rx"] = float(T_RX)
         results.append(res)
         print(f"  T={T_RX:5.1f}s: rms {res['rms']:,.1f} m, "
               f"alt {res['h']:,.0f} m"
@@ -892,9 +921,26 @@ def full_fix(path, fs, det, dur, multi=1):
         # numbers below describe what happened -- never as a position.
         good = results
     P = np.array([r["x"][:3] for r in good])
-    scatter = float(np.linalg.norm(P.std(axis=0))) if len(good) > 1 else 0.0
+    T = np.array([r.get("t_rx", 0.0) for r in good], float)
+    scatter = float(np.linalg.norm(P.std(axis=0))) if len(good) > 1 else None
     lat, lon, h = ecef_to_llh(P.mean(axis=0))
     rms = float(np.mean([r["rms"] for r in good]))
+    # 4b. the epochs are not repeat measurements of one point when the
+    # receiver is MOVING -- they are a track. Drive #3 (8/29) recorded 90 s
+    # captures at 50 mph: the car covered 2.0 km DURING each one, and the
+    # epoch scatter dutifully reported ~500 m, which was the road, not the
+    # error (median |scatter - v*T/sqrt(12)| across the drive: 33 m). So
+    # keep every epoch's own position, fit a straight line through them,
+    # and report BOTH numbers: the spread about the mean (what scatter has
+    # always meant) and the spread about the fitted track, which is the
+    # accuracy figure once the vehicle is taken out of it.
+    track = []
+    for r in good:
+        _la, _lo, _h = ecef_to_llh(np.asarray(r["x"][:3], float))
+        track.append({"t_rx_s": round(float(r.get("t_rx", 0.0)), 2),
+                      "lat": _la, "lon": _lo, "alt_m": _h,
+                      "rms_m": float(r["rms"])})
+    speed, scatter_track = motion_fit(P, T)
     # 5. is this a FIX or a number? A real single-frequency solve sits at
     # tens of metres rms with epochs that agree to ~100 m. A wrong-integer
     # solve (the ms-ambiguity search landing on a garbage minimum) shows up
@@ -904,19 +950,47 @@ def full_fix(path, fs, det, dur, multi=1):
     # below is loose enough that a rooftop with a bad sky still passes;
     # only a non-solution fails them all at once.
     reasons = []
+    if len(good) < MIN_EPOCHS:
+        # Drive #3 stop 18 (8/29 23:56Z) solved on ONE epoch: scatter 0.0 m,
+        # altitude +4,595 m, valid=true, and the map drew it as the best
+        # stop of the whole moving leg. With one epoch the scatter is zero
+        # BY CONSTRUCTION -- the honesty metric reads perfect exactly where
+        # there is no repeatability left to measure. Refuse the fix instead.
+        if len(epochs) >= MIN_EPOCHS:
+            # the solve is sick: most of its epochs died on the way
+            reasons.append(f"only {len(good)} of {len(epochs)} epochs "
+                           f"survived - too few to tell an accurate fix from "
+                           f"a lucky one (with one epoch the scatter is zero "
+                           f"by construction, not by accuracy)")
+        else:
+            # the RUN was configured too small to be gradeable
+            reasons.append(f"asked for {len(epochs)} epoch(s); a fix needs at "
+                           f"least {MIN_EPOCHS} before its scatter means "
+                           f"anything - re-run without --multi (default 15)")
     if not (-500 < h < 5000):
         reasons.append(f"altitude {h:,.0f} m is not on this planet's surface")
     if rms > 1000.0:
         reasons.append(f"residual rms {rms:,.0f} m (a real fix is tens of m)")
-    if scatter > 5000.0:
+    if scatter is not None and scatter > 5000.0:
         reasons.append(f"epoch scatter {scatter:,.0f} m (epochs disagree by km)")
+    if speed is not None and speed > SPEED_MAX:
+        # A gate that needs no magic altitude: the epochs imply how fast the
+        # receiver was moving, and a car does not do 300 mph.
+        reasons.append(f"epochs imply a receiver speed of {speed:,.0f} m/s "
+                       f"({speed*2.23694:,.0f} mph) - not a vehicle")
     valid = not reasons
     kept = write_fix_result({
         "valid": valid,
         "lat": lat, "lon": lon, "alt_m": h,
         "birds": sorted(int(p) for p in birds),
         "resid_rms_m": rms, "epochs_used": len(good),
-        "scatter_m": scatter, "iono_corrected": good[0]["iono"],
+        "epochs_attempted": int(len(epochs)),
+        "scatter_m": scatter,
+        "scatter_about_track_m": scatter_track,
+        "speed_mps": speed,
+        "t_rx_ref_s": round(float(T.mean()), 2) if len(good) else None,
+        "track": track,
+        "iono_corrected": good[0]["iono"],
         "el_deg": good[0]["el_deg"],
         "ms_offsets": good[0]["offsets"],
         "capture": str(path)})
@@ -924,6 +998,20 @@ def full_fix(path, fs, det, dur, multi=1):
         print(f"[fix] SOLVED with {len(birds)} birds x {len(good)} epoch(s): "
               f"mean rms {rms:,.1f} m, epoch scatter {scatter:,.1f} m, "
               f"altitude PLAUSIBLE ({h:,.0f} m)")
+        if speed is not None and speed > MOVING_MPS:
+            span = speed * (float(T.max() - T.min()))
+            print(f"[fix] the receiver was MOVING at {speed:,.1f} m/s "
+                  f"({speed*2.23694:,.0f} mph): the epochs span {span:,.0f} m "
+                  f"of road, so {scatter:,.0f} m of 'scatter' is mostly the "
+                  f"car. Spread about the fitted track: "
+                  f"{scatter_track:,.0f} m -- THAT is the accuracy figure. "
+                  f"The position above is the mid-point of the run; "
+                  f"lab_local/fix_result.json['track'] has all "
+                  f"{len(track)} epoch positions.")
+        elif speed is not None:
+            print(f"[fix] receiver effectively stationary "
+                  f"({speed:,.1f} m/s implied); spread about the fitted "
+                  f"track {scatter_track:,.0f} m")
         dof = len(birds) - 4
         if dof <= 1:
             # 8/15 live: 5 birds printed "rms 2.8 m" beside a 41 m scatter.
@@ -932,8 +1020,12 @@ def full_fix(path, fs, det, dur, multi=1):
             print(f"[fix] note: with {len(birds)} satellites the solve has "
                   f"{dof} degree{'s' if dof != 1 else ''} of freedom, so the "
                   f"residual rms is NOT an accuracy figure -- the epoch "
-                  f"scatter ({scatter:,.0f} m) is. More sky = more birds = "
-                  f"an honest rms.")
+                  f"scatter is"
+                  + (f" ({scatter_track:,.0f} m about the track, once the "
+                     f"vehicle's motion is removed)"
+                     if speed is not None and speed > MOVING_MPS
+                     else f" ({scatter:,.0f} m)")
+                  + ". More sky = more birds = an honest rms.")
         print(f"[fix] coordinates written to lab_local/fix_result.json "
               f"(gitignored - yours alone)")
         print(f"[fix] this stop kept as lab_local/{kept.name} -- later stops "
